@@ -1,8 +1,10 @@
 # GitLore Backend
 
-Hono + MongoDB API, merged in small PRs. This commit adds GitHub OAuth (`/auth/*`) on top of `/health` and `/test/*`.
+Hono + MongoDB API, merged in small PRs. This commit adds protected repository REST helpers (`/api/repo/*`, `/api/repos/*`), guardrails, and narrate (placeholder).
 
-## Run (this PR)
+Earlier PRs in this stack: foundation (`/health`, `/test/*`) and GitHub OAuth (`/auth/*`). Next PR adds analyze, explain, and search (Gemini).
+
+## Run
 
 ```bash
 cd Backend
