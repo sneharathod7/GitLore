@@ -14,9 +14,52 @@ import {
   getRepoFileContent,
   listAuthenticatedUserRepos,
   searchRepositoriesRest,
+  fetchGithubUserRest,
+  listPullRequestsRest,
+  getPullRequestDiffRest,
+  listPullRequestReviewCommentsRest,
+  getPullRequestRest,
+  fetchRepositoryMetadataRest,
+  searchRepoCountRest,
+  countCommitsApproxRest,
+  GithubRestError,
 } from "../lib/githubRest";
 
 export const repoRouter = new Hono();
+
+/**
+ * GET /api/user/github-profile — followers, repos, etc. for the signed-in user.
+ */
+repoRouter.get("/user/github-profile", async (c) => {
+  try {
+    const user = getCurrentUser(c);
+    if (!user) {
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+    const profile = await fetchGithubUserRest(user.access_token);
+    return c.json({
+      login: profile.login,
+      name: profile.name,
+      avatar_url: profile.avatar_url,
+      public_repos: profile.public_repos,
+      followers: profile.followers,
+      following: profile.following,
+      total_private_repos: profile.total_private_repos,
+    });
+  } catch (error) {
+    console.error("github-profile error:", error);
+    return c.json(
+      {
+        error: "Failed to load GitHub profile",
+        message:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
+      },
+      500
+    );
+  }
+});
 
 /**
  * GET /api/repos/me?limit=30 — repos for the signed-in user (updated desc).
@@ -191,6 +234,101 @@ repoRouter.get("/repo/:owner/:name/raw", async (c) => {
 });
 
 /**
+ * GET /api/repo/:owner/:name/pulls?limit=20
+ */
+repoRouter.get("/repo/:owner/:name/pulls", async (c) => {
+  try {
+    const user = getCurrentUser(c);
+    if (!user) {
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    const limit = Math.min(parseInt(c.req.query("limit") || "20", 10) || 20, 30);
+    if (!owner || !name) {
+      return c.json({ error: "Missing owner or repository name" }, 400);
+    }
+    const raw = await listPullRequestsRest(user.access_token, owner, name, limit);
+    const pulls = raw.map((p) => ({
+      number: p.number,
+      title: p.title,
+      state: p.state,
+      updatedAt: p.updated_at,
+      htmlUrl: p.html_url,
+      authorLogin: p.user?.login || null,
+    }));
+    return c.json({ pulls });
+  } catch (error) {
+    console.error("repo pulls list error:", error);
+    return c.json(
+      {
+        error: "Failed to list pull requests",
+        message:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
+      },
+      500
+    );
+  }
+});
+
+/**
+ * GET /api/repo/:owner/:name/pulls/:number/diff-review
+ */
+repoRouter.get("/repo/:owner/:name/pulls/:number/diff-review", async (c) => {
+  try {
+    const user = getCurrentUser(c);
+    if (!user) {
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    const numStr = c.req.param("number");
+    const pullNumber = parseInt(numStr, 10);
+    if (!owner || !name || !Number.isFinite(pullNumber)) {
+      return c.json({ error: "Invalid parameters" }, 400);
+    }
+
+    const [detail, diff, comments] = await Promise.all([
+      getPullRequestRest(user.access_token, owner, name, pullNumber),
+      getPullRequestDiffRest(user.access_token, owner, name, pullNumber),
+      listPullRequestReviewCommentsRest(user.access_token, owner, name, pullNumber),
+    ]);
+
+    return c.json({
+      number: detail.number,
+      title: detail.title,
+      state: detail.state,
+      authorLogin: detail.user?.login || null,
+      updatedAt: detail.updated_at,
+      htmlUrl: detail.html_url,
+      diff,
+      comments: comments.map((x) => ({
+        id: x.id,
+        path: x.path,
+        line: x.line,
+        body: x.body,
+        author: x.user?.login || "unknown",
+        diff_hunk: x.diff_hunk,
+      })),
+    });
+  } catch (error) {
+    console.error("diff-review error:", error);
+    return c.json(
+      {
+        error: "Failed to load pull request diff",
+        message:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
+      },
+      500
+    );
+  }
+});
+
+/**
  * GET /api/repo/:owner/:name
  * Get repository overview information
  */
@@ -214,7 +352,7 @@ repoRouter.get("/repo/:owner/:name", async (c) => {
 
     const db = getDB();
     const repoFull = `${owner}/${name}`;
-    const cacheKey = `repo:${owner}:${name}:${branchHint || "__def__"}`;
+    const cacheKey = `repo:${owner.toLowerCase()}:${name.toLowerCase()}:${branchHint || "__def__"}`;
     const cached = await db.collection("repo_cache").findOne({ _id: cacheKey } as any);
 
     if (cached && new Date() < cached.expires_at) {
@@ -223,17 +361,61 @@ repoRouter.get("/repo/:owner/:name", async (c) => {
 
     const githubClient = createGithubClient(user.access_token);
 
-    const repoInfo = await getRepositoryInfo(githubClient as any, owner, name);
-    const stats = await getRepositoryStats(githubClient as any, owner, name);
+    let repoInfo = await getRepositoryInfo(githubClient as any, owner, name);
+    let stats = await getRepositoryStats(githubClient as any, owner, name);
 
     if (!repoInfo) {
-      return c.json(
-        {
-          error: "Repository not found",
-          message: `Could not find repository ${owner}/${name}`,
-        },
-        404
-      );
+      try {
+        const meta = await fetchRepositoryMetadataRest(user.access_token, owner, name);
+        repoInfo = {
+          name: meta.name,
+          description: meta.description,
+          url: meta.html_url,
+          isPrivate: meta.private,
+          stargazerCount: meta.stargazers_count,
+          forkCount: meta.forks_count,
+          primaryLanguage: meta.language ? { name: meta.language } : null,
+          owner: { login: meta.owner.login, type: meta.owner.type || "User" },
+        };
+        const [prCount, issueCount, totalCommits] = await Promise.all([
+          searchRepoCountRest(user.access_token, owner, name, "pr"),
+          searchRepoCountRest(user.access_token, owner, name, "issue"),
+          countCommitsApproxRest(user.access_token, owner, name, meta.default_branch),
+        ]);
+        stats = {
+          refs: {
+            nodes: [
+              {
+                name: meta.default_branch,
+                target: { history: { totalCount: totalCommits } },
+              },
+            ],
+          },
+          pullRequests: { totalCount: prCount },
+          issues: { totalCount: issueCount },
+        };
+      } catch (restErr) {
+        console.error("Overview: GraphQL missed; REST fallback failed:", restErr);
+        if (restErr instanceof GithubRestError && restErr.status === 404) {
+          return c.json(
+            {
+              error: "Repository not found",
+              message: `Could not find repository ${owner}/${name}`,
+            },
+            404
+          );
+        }
+        return c.json(
+          {
+            error: "Failed to fetch repository information",
+            message:
+              process.env.NODE_ENV === "development" && restErr instanceof Error
+                ? restErr.message
+                : undefined,
+          },
+          500
+        );
+      }
     }
 
     const refs = stats?.refs?.nodes || [];
@@ -261,7 +443,7 @@ repoRouter.get("/repo/:owner/:name", async (c) => {
       };
     }
 
-    const patternRows = await aggregatePatternCounts(db, repoFull);
+    const patternRows = await aggregatePatternCounts(db, owner, name);
     const topAntiPatterns = patternRows.map((p, i) => ({
       text: p.text,
       count: p.count,
@@ -358,17 +540,22 @@ repoRouter.post("/repo/search", async (c) => {
     const body = await c.req.json();
     const { owner, name } = repoSearchSchema.parse(body);
 
-    // For MVP, just validate the repo exists
     const githubClient = createGithubClient(user.access_token);
-    const repoInfo = await getRepositoryInfo(githubClient as any, owner, name);
+    let repoInfo = await getRepositoryInfo(githubClient as any, owner, name);
+    let repoUrl: string;
 
-    if (!repoInfo) {
-      return c.json(
-        {
-          error: "Repository not found",
-        },
-        404
-      );
+    if (repoInfo) {
+      repoUrl = repoInfo.url;
+    } else {
+      try {
+        const meta = await fetchRepositoryMetadataRest(user.access_token, owner, name);
+        repoUrl = meta.html_url;
+      } catch (e) {
+        if (e instanceof GithubRestError && e.status === 404) {
+          return c.json({ error: "Repository not found" }, 404);
+        }
+        throw e;
+      }
     }
 
     return c.json({
@@ -376,7 +563,7 @@ repoRouter.post("/repo/search", async (c) => {
       repository: {
         owner,
         name,
-        url: repoInfo.url,
+        url: repoUrl,
       },
     });
   } catch (error) {

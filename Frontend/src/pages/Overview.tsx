@@ -4,7 +4,7 @@ import { RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { FadeIn } from "../components/effects/FadeIn";
 import { useAuth } from "@/context/AuthContext";
 import { useRepo } from "@/context/RepoContext";
-import { fetchRepoOverview, type RepoOverviewResponse } from "@/lib/gitloreApi";
+import { fetchRepoOverview, fetchRepoPullRequests, type RepoOverviewResponse, type RepoPullSummary } from "@/lib/gitloreApi";
 import { startGithubOAuth as oauthNav } from "@/lib/githubOAuth";
 
 interface GraphNode {
@@ -305,6 +305,9 @@ const Overview = () => {
   const [data, setData] = useState<RepoOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [recentPulls, setRecentPulls] = useState<RepoPullSummary[]>([]);
+  const [pullsLoading, setPullsLoading] = useState(false);
+  const [pullsErr, setPullsErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) {
@@ -341,6 +344,34 @@ const Overview = () => {
       cancelled = true;
     };
   }, [user, repoReady, target.owner, target.name, target.branch]);
+
+  useEffect(() => {
+    if (!user || !repoReady) {
+      setRecentPulls([]);
+      setPullsLoading(false);
+      setPullsErr(null);
+      return;
+    }
+    let cancelled = false;
+    setPullsLoading(true);
+    setPullsErr(null);
+    void fetchRepoPullRequests(target.owner, target.name, 12)
+      .then((list) => {
+        if (!cancelled) setRecentPulls(list);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setRecentPulls([]);
+          setPullsErr(e instanceof Error ? e.message : "Could not load pull requests");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPullsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, repoReady, target.owner, target.name]);
 
   const graphNodes: GraphNode[] = useMemo(() => {
     const raw = data?.knowledgeGraph?.nodes || [];
@@ -419,10 +450,13 @@ const Overview = () => {
             {loading && <p className="text-sm text-gitlore-text-secondary">Loading overview from GitHub…</p>}
 
             <FadeIn direction="up">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
                 {[
-                  { value: stats ? fmt(stats.pullRequests) : "—", label: "PRs" },
+                  { value: stats ? fmt(stats.stars) : "—", label: "Stars" },
+                  { value: stats ? fmt(stats.forks) : "—", label: "Forks" },
+                  { value: stats ? fmt(stats.pullRequests) : "—", label: "Open + closed PRs (total)" },
                   { value: stats ? fmt(stats.commits) : "—", label: "Commits (default branch)" },
+                  { value: stats?.issues != null ? fmt(stats.issues) : "—", label: "Issues" },
                   { value: stats?.contributors != null ? fmt(stats.contributors) : "—", label: "Contributors" },
                   { value: stats?.files != null ? fmt(stats.files) : "—", label: "Files (tree)" },
                 ].map((stat) => (
@@ -433,6 +467,34 @@ const Overview = () => {
                 ))}
               </div>
             </FadeIn>
+
+            <div>
+              <div className="mb-3 text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary">Recent pull requests</div>
+              {pullsErr && <p className="mb-2 text-sm text-gitlore-error">{pullsErr}</p>}
+              {pullsLoading && <p className="text-sm text-gitlore-text-secondary">Loading PRs from GitHub…</p>}
+              {!pullsLoading && !pullsErr && recentPulls.length === 0 && (
+                <p className="text-sm text-gitlore-text-secondary">No pull requests returned (empty repo or API scope).</p>
+              )}
+              <ul className="space-y-2">
+                {recentPulls.map((pr) => (
+                  <li key={pr.number} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
+                    <a
+                      href={pr.htmlUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="shrink-0 font-code text-gitlore-accent hover:text-gitlore-accent-hover"
+                    >
+                      #{pr.number}
+                    </a>
+                    <span className="min-w-0 flex-1 text-gitlore-text">{pr.title}</span>
+                    <span className="font-code text-[11px] uppercase text-gitlore-text-secondary">{pr.state}</span>
+                    {pr.authorLogin ? (
+                      <span className="font-code text-[11px] text-gitlore-text-secondary">@{pr.authorLogin}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
 
             <div>
               <div className="mb-3 text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary">Code Health Score</div>

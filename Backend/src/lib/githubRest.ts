@@ -4,6 +4,11 @@
 
 const GH_API = "https://api.github.com";
 
+/** Encoded /repos/{owner}/{repo} root for API paths. */
+export function githubRepoApiRoot(owner: string, repo: string): string {
+  return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+}
+
 export class GithubRestError extends Error {
   constructor(
     public status: number,
@@ -27,6 +32,116 @@ export async function githubRestJson<T>(token: string, path: string): Promise<T>
     throw new GithubRestError(res.status, text.slice(0, 500));
   }
   return JSON.parse(text) as T;
+}
+
+export async function githubRestText(
+  token: string,
+  path: string,
+  accept = "application/vnd.github.diff"
+): Promise<string> {
+  const res = await fetch(`${GH_API}${path}`, {
+    headers: {
+      Accept: accept,
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new GithubRestError(res.status, text.slice(0, 500));
+  }
+  return text;
+}
+
+export type GithubUserRest = {
+  login: string;
+  name: string | null;
+  avatar_url: string;
+  public_repos: number;
+  followers: number;
+  following: number;
+  total_private_repos?: number;
+};
+
+export async function fetchGithubUserRest(token: string): Promise<GithubUserRest> {
+  return githubRestJson<GithubUserRest>(token, "/user");
+}
+
+export type PullRequestListItem = {
+  number: number;
+  title: string;
+  state: string;
+  updated_at: string;
+  html_url: string;
+  user: { login: string } | null;
+};
+
+export async function listPullRequestsRest(
+  token: string,
+  owner: string,
+  repo: string,
+  limit: number
+): Promise<PullRequestListItem[]> {
+  const n = Math.min(Math.max(limit, 1), 30);
+  return githubRestJson<PullRequestListItem[]>(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls?state=all&sort=updated&direction=desc&per_page=${n}`
+  );
+}
+
+export type PullReviewCommentRest = {
+  id: number;
+  path: string;
+  line: number | null;
+  body: string;
+  user: { login: string } | null;
+  diff_hunk: string | null;
+};
+
+export async function listPullRequestReviewCommentsRest(
+  token: string,
+  owner: string,
+  repo: string,
+  pullNumber: number
+): Promise<PullReviewCommentRest[]> {
+  return githubRestJson<PullReviewCommentRest[]>(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/comments?per_page=100`
+  );
+}
+
+export async function getPullRequestDiffRest(
+  token: string,
+  owner: string,
+  repo: string,
+  pullNumber: number
+): Promise<string> {
+  return githubRestText(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}`,
+    "application/vnd.github.diff"
+  );
+}
+
+export type PullRequestDetailRest = {
+  number: number;
+  title: string;
+  state: string;
+  user: { login: string } | null;
+  updated_at: string;
+  html_url: string;
+};
+
+export async function getPullRequestRest(
+  token: string,
+  owner: string,
+  repo: string,
+  pullNumber: number
+): Promise<PullRequestDetailRest> {
+  return githubRestJson<PullRequestDetailRest>(
+    token,
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}`
+  );
 }
 
 export type OverviewFileChange = { name: string; changes: number; touches: number };
@@ -101,23 +216,88 @@ function layoutGraphNodes(files: OverviewFileChange[]): {
 /**
  * File churn from recent commits + counts + graph layout + default branch metadata.
  */
+export type GithubRepoMetadataRest = {
+  name: string;
+  full_name: string;
+  description: string | null;
+  html_url: string;
+  private: boolean;
+  default_branch: string;
+  stargazers_count: number;
+  forks_count: number;
+  language: string | null;
+  owner: { login: string; type?: string };
+};
+
+export async function fetchRepositoryMetadataRest(
+  token: string,
+  owner: string,
+  repo: string
+): Promise<GithubRepoMetadataRest> {
+  return githubRestJson<GithubRepoMetadataRest>(token, githubRepoApiRoot(owner, repo));
+}
+
+/** GitHub Search API: total PRs or issues for a repo. */
+export async function searchRepoCountRest(
+  token: string,
+  owner: string,
+  repo: string,
+  filter: "pr" | "issue"
+): Promise<number> {
+  const q = encodeURIComponent(`repo:${owner}/${repo} is:${filter}`);
+  const data = await githubRestJson<{ total_count: number }>(
+    token,
+    `/search/issues?q=${q}&per_page=1`
+  );
+  return typeof data.total_count === "number" ? data.total_count : 0;
+}
+
+/** Approximate commit count on a branch via the commits list Link header. */
+export async function countCommitsApproxRest(
+  token: string,
+  owner: string,
+  repo: string,
+  branch: string
+): Promise<number> {
+  const headers = {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${token}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+  } as const;
+  const root = `${GH_API}${githubRepoApiRoot(owner, repo)}`;
+  const u = `${root}/commits?sha=${encodeURIComponent(branch)}&per_page=100`;
+  const res = await fetch(u, { headers });
+  if (!res.ok) return 0;
+  const link = res.headers.get("Link");
+  const first = (await res.json()) as unknown[];
+  const n0 = Array.isArray(first) ? first.length : 0;
+  if (!link?.includes('rel="last"')) return n0;
+  const m = link.match(/page=(\d+)>; rel="last"/);
+  if (!m) return n0;
+  const lastPage = parseInt(m[1], 10);
+  if (lastPage <= 1) return n0;
+  const lastRes = await fetch(`${u}&page=${lastPage}`, { headers });
+  if (!lastRes.ok) return (lastPage - 1) * 100 + n0;
+  const lastItems = (await lastRes.json()) as unknown[];
+  const nLast = Array.isArray(lastItems) ? lastItems.length : 0;
+  return (lastPage - 1) * 100 + nLast;
+}
+
 export async function enrichRepositoryOverview(
   token: string,
   owner: string,
   repo: string,
   preferredBranch?: string
 ): Promise<RepoOverviewEnrichment> {
-  const meta = await githubRestJson<{ default_branch: string }>(
-    token,
-    `/repos/${owner}/${repo}`
-  );
+  const root = githubRepoApiRoot(owner, repo);
+  const meta = await githubRestJson<{ default_branch: string }>(token, root);
   const branch = preferredBranch?.trim() || meta.default_branch;
 
   let contributorCount = 0;
   try {
     const contribs = await githubRestJson<unknown[]>(
       token,
-      `/repos/${owner}/${repo}/contributors?per_page=100&anon=false`
+      `${root}/contributors?per_page=100&anon=false`
     );
     contributorCount = Array.isArray(contribs) ? contribs.length : 0;
   } catch {
@@ -128,7 +308,7 @@ export async function enrichRepositoryOverview(
   try {
     const commits = await githubRestJson<Array<{ sha: string }>>(
       token,
-      `/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(branch)}&per_page=15`
+      `${root}/commits?sha=${encodeURIComponent(branch)}&per_page=15`
     );
     const batchSize = 5;
     for (let i = 0; i < commits.length; i += batchSize) {
@@ -138,7 +318,7 @@ export async function enrichRepositoryOverview(
           try {
             const detail = await githubRestJson<{
               files?: Array<{ filename: string; changes?: number }>;
-            }>(token, `/repos/${owner}/${repo}/commits/${c.sha}`);
+            }>(token, `${root}/commits/${c.sha}`);
             for (const f of detail.files || []) {
               const cur = fileTouches.get(f.filename) || { touches: 0, changes: 0 };
               cur.touches += 1;
@@ -164,15 +344,15 @@ export async function enrichRepositoryOverview(
   try {
     const br = await githubRestJson<{ commit: { sha: string } }>(
       token,
-      `/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`
+      `${root}/branches/${encodeURIComponent(branch)}`
     );
     const commitDetail = await githubRestJson<{ tree: { sha: string } }>(
       token,
-      `/repos/${owner}/${repo}/git/commits/${br.commit.sha}`
+      `${root}/git/commits/${br.commit.sha}`
     );
     const tree = await githubRestJson<{ tree: Array<{ type: string }>; truncated: boolean }>(
       token,
-      `/repos/${owner}/${repo}/git/trees/${commitDetail.tree.sha}?recursive=1`
+      `${root}/git/trees/${commitDetail.tree.sha}?recursive=1`
     );
     fileCount = tree.tree.filter((t) => t.type === "blob").length;
   } catch {
@@ -197,23 +377,21 @@ export async function listRepoPathsLimited(
   ref: string,
   maxFiles: number
 ): Promise<{ paths: string[]; truncated: boolean; defaultBranch: string }> {
-  const meta = await githubRestJson<{ default_branch: string }>(
-    token,
-    `/repos/${owner}/${repo}`
-  );
+  const root = githubRepoApiRoot(owner, repo);
+  const meta = await githubRestJson<{ default_branch: string }>(token, root);
   const branch = ref.trim() || meta.default_branch;
 
   const br = await githubRestJson<{ commit: { sha: string } }>(
     token,
-    `/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`
+    `${root}/branches/${encodeURIComponent(branch)}`
   );
   const commitDetail = await githubRestJson<{ tree: { sha: string } }>(
     token,
-    `/repos/${owner}/${repo}/git/commits/${br.commit.sha}`
+    `${root}/git/commits/${br.commit.sha}`
   );
   const tree = await githubRestJson<{ tree: Array<{ type: string; path?: string }>; truncated: boolean }>(
     token,
-    `/repos/${owner}/${repo}/git/trees/${commitDetail.tree.sha}?recursive=1`
+    `${root}/git/trees/${commitDetail.tree.sha}?recursive=1`
   );
   const blobs = tree.tree
     .filter((t) => t.type === "blob" && t.path)
@@ -244,7 +422,7 @@ export async function getRepoFileContent(
     encoding?: string;
     size?: number;
     message?: string;
-  }>(token, `/repos/${owner}/${repo}/contents/${encPath}?${q}`);
+  }>(token, `${githubRepoApiRoot(owner, repo)}/contents/${encPath}?${q}`);
 
   if (data.encoding === "base64" && data.content) {
     const raw = Buffer.from(data.content.replace(/\n/g, ""), "base64");
@@ -262,13 +440,20 @@ export async function getRepoFileContent(
   return { text: null, isBinary: true, size: data.size ?? 0 };
 }
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Match explanations for owner/name regardless of `owner/name` string casing. */
 export async function aggregatePatternCounts(
   db: import("mongodb").Db,
-  repoFull: string
+  owner: string,
+  repoName: string
 ): Promise<Array<{ text: string; count: number }>> {
+  const pattern = new RegExp(`^${escapeRegex(owner)}/${escapeRegex(repoName)}$`, "i");
   const docs = await db
     .collection("explanations_cache")
-    .find({ repo: repoFull })
+    .find({ repo: pattern })
     .limit(300)
     .toArray();
 
