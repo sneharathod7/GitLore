@@ -2,145 +2,130 @@ import { useEffect, useState } from "react";
 import { FadeIn } from "../components/effects/FadeIn";
 import { useAuth } from "@/context/AuthContext";
 import { useRepo } from "@/context/RepoContext";
-import { fetchRepoOverview } from "@/lib/gitloreApi";
+import { fetchRepoOverview, type RepoOverviewResponse } from "@/lib/gitloreApi";
 
 /* ── Pattern data ── */
-interface Pattern {
+interface ReferencePattern {
   name: string;
   langs: string[];
   anti: string;
   correct: string;
-  detected: number;
-  maxBar: number;
 }
 
-const PATTERNS: Pattern[] = [
+/** Static examples only — never shown as “detected in your repo”. */
+const REFERENCE_PATTERNS: ReferencePattern[] = [
   {
     name: "Memory Leak -- useEffect",
     langs: ["JavaScript", "TypeScript"],
     anti: `useEffect(() => {\n  fetch(url).then(r => r.json())\n    .then(setData);\n}, []);`,
     correct: `useEffect(() => {\n  const ctrl = new AbortController();\n  fetch(url, { signal: ctrl.signal })\n    .then(r => r.json()).then(setData);\n  return () => ctrl.abort();\n}, []);`,
-    detected: 3,
-    maxBar: 20,
   },
   {
     name: "N+1 Query",
     langs: ["Python", "JavaScript"],
     anti: `for user in users:\n  orders = db.query(\n    "SELECT * FROM orders WHERE uid=?", user.id)`,
     correct: `orders = db.query(\n  "SELECT * FROM orders WHERE uid IN (?)",\n  [u.id for u in users])`,
-    detected: 8,
-    maxBar: 20,
   },
   {
     name: "SQL Injection",
     langs: ["Python", "Java"],
     anti: `query = f"SELECT * FROM users\n  WHERE name = '{name}'"`,
     correct: `cursor.execute(\n  "SELECT * FROM users WHERE name = %s",\n  (name,))`,
-    detected: 0,
-    maxBar: 20,
   },
   {
     name: "XSS -- innerHTML",
     langs: ["JavaScript", "TypeScript"],
     anti: `el.innerHTML = userInput;`,
     correct: `el.textContent = userInput;\n// or use DOMPurify.sanitize()`,
-    detected: 1,
-    maxBar: 20,
   },
   {
     name: "Unhandled Promise Rejection",
     langs: ["JavaScript", "TypeScript"],
     anti: `fetch('/api/data')\n  .then(r => r.json())\n  .then(setData);`,
     correct: `fetch('/api/data')\n  .then(r => r.json())\n  .then(setData)\n  .catch(err => setError(err));`,
-    detected: 5,
-    maxBar: 20,
   },
   {
     name: "Race Condition -- setState",
     langs: ["JavaScript", "TypeScript"],
     anti: `setCount(count + 1);\nsetCount(count + 1);\n// only increments once`,
     correct: `setCount(c => c + 1);\nsetCount(c => c + 1);\n// increments twice`,
-    detected: 2,
-    maxBar: 20,
   },
   {
     name: "Hardcoded Secrets",
     langs: ["Python", "JavaScript"],
     anti: `API_KEY = "sk-abc123def456"\nheaders = {"Auth": API_KEY}`,
     correct: `API_KEY = os.environ["API_KEY"]\nheaders = {"Auth": API_KEY}`,
-    detected: 1,
-    maxBar: 20,
   },
   {
     name: "Missing Error Boundary",
     langs: ["TypeScript", "JavaScript"],
     anti: `<App>\n  <UserProfile />\n  <Dashboard />\n</App>`,
     correct: `<App>\n  <ErrorBoundary>\n    <UserProfile />\n  </ErrorBoundary>\n</App>`,
-    detected: 4,
-    maxBar: 20,
   },
   {
     name: "Stale Closure",
     langs: ["JavaScript", "TypeScript"],
     anti: `useEffect(() => {\n  const id = setInterval(() => {\n    console.log(count); // stale\n  }, 1000);\n}, []);`,
     correct: `useEffect(() => {\n  const id = setInterval(() => {\n    setCount(c => c + 1);\n  }, 1000);\n  return () => clearInterval(id);\n}, []);`,
-    detected: 2,
-    maxBar: 20,
   },
   {
     name: "God Component",
     langs: ["TypeScript", "JavaScript"],
     anti: `// 500+ line component\nconst Dashboard = () => {\n  // auth, data, UI, state...\n}`,
     correct: `// Split into focused modules\n<AuthGate />\n<DataProvider>\n  <DashboardUI />\n</DataProvider>`,
-    detected: 3,
-    maxBar: 20,
   },
-  { name: "Prop Drilling (3+ levels)", langs: ["TypeScript"], anti: "", correct: "", detected: 2, maxBar: 20 },
-  { name: "Mutable State Mutation", langs: ["JavaScript"], anti: "", correct: "", detected: 1, maxBar: 20 },
-  { name: "Unbounded List Rendering", langs: ["TypeScript"], anti: "", correct: "", detected: 4, maxBar: 20 },
-  { name: "Implicit Any", langs: ["TypeScript"], anti: "", correct: "", detected: 6, maxBar: 20 },
-  { name: "Magic Number", langs: ["JavaScript", "Python"], anti: "", correct: "", detected: 7, maxBar: 20 },
-  { name: "Deeply Nested Ternary", langs: ["JavaScript"], anti: "", correct: "", detected: 1, maxBar: 20 },
-  { name: "Missing Key Prop", langs: ["TypeScript"], anti: "", correct: "", detected: 3, maxBar: 20 },
-  { name: "Console.log in Production", langs: ["JavaScript"], anti: "", correct: "", detected: 9, maxBar: 20 },
-  { name: "Synchronous localStorage", langs: ["JavaScript"], anti: "", correct: "", detected: 2, maxBar: 20 },
-  { name: "Event Listener Leak", langs: ["JavaScript"], anti: "", correct: "", detected: 1, maxBar: 20 },
+  { name: "Prop Drilling (3+ levels)", langs: ["TypeScript"], anti: "", correct: "" },
+  { name: "Mutable State Mutation", langs: ["JavaScript"], anti: "", correct: "" },
+  { name: "Unbounded List Rendering", langs: ["TypeScript"], anti: "", correct: "" },
+  { name: "Implicit Any", langs: ["TypeScript"], anti: "", correct: "" },
+  { name: "Magic Number", langs: ["JavaScript", "Python"], anti: "", correct: "" },
+  { name: "Deeply Nested Ternary", langs: ["JavaScript"], anti: "", correct: "" },
+  { name: "Missing Key Prop", langs: ["TypeScript"], anti: "", correct: "" },
+  { name: "Console.log in Production", langs: ["JavaScript"], anti: "", correct: "" },
+  { name: "Synchronous localStorage", langs: ["JavaScript"], anti: "", correct: "" },
+  { name: "Event Listener Leak", langs: ["JavaScript"], anti: "", correct: "" },
 ];
 
 const Patterns = () => {
   const { user } = useAuth();
   const { target, repoFull, repoReady, repoResolving } = useRepo();
-  const [search, setSearch] = useState("");
-  const [repoPrimaryLang, setRepoPrimaryLang] = useState<string | null>(null);
-  const [cachedPatternHits, setCachedPatternHits] = useState(0);
+  const [refSearch, setRefSearch] = useState("");
+  const [repoSearch, setRepoSearch] = useState("");
+  const [overview, setOverview] = useState<RepoOverviewResponse | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
 
   useEffect(() => {
     if (!user || !repoReady) {
-      setRepoPrimaryLang(null);
-      setCachedPatternHits(0);
+      setOverview(null);
+      setOverviewLoading(false);
       return;
     }
     let cancelled = false;
+    setOverviewLoading(true);
     void fetchRepoOverview(target.owner, target.name, target.branch)
       .then((o) => {
-        if (cancelled) return;
-        setRepoPrimaryLang(o.language || null);
-        const hits = (o.topAntiPatterns || []).reduce((s, x) => s + x.count, 0);
-        setCachedPatternHits(hits);
+        if (!cancelled) setOverview(o);
       })
       .catch(() => {
-        if (!cancelled) {
-          setRepoPrimaryLang(null);
-          setCachedPatternHits(0);
-        }
+        if (!cancelled) setOverview(null);
+      })
+      .finally(() => {
+        if (!cancelled) setOverviewLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [user, repoReady, target.owner, target.name, target.branch]);
 
-  const filtered = PATTERNS.filter((p) =>
-    p.name.toLowerCase().includes(search.toLowerCase())
+  const repoPrimaryLang = overview?.language ?? null;
+  const topAnti = overview?.topAntiPatterns ?? [];
+  const cachedPatternHits = topAnti.reduce((s, x) => s + x.count, 0);
+
+  const filteredRef = REFERENCE_PATTERNS.filter((p) =>
+    p.name.toLowerCase().includes(refSearch.toLowerCase())
+  );
+  const filteredRepoAnti = topAnti.filter((item) =>
+    item.text.toLowerCase().includes(repoSearch.toLowerCase())
   );
 
   if (user && repoResolving) {
@@ -171,85 +156,115 @@ const Patterns = () => {
           Pattern Library
         </h1>
         <p className="text-sm text-gitlore-text-secondary mb-2">
-          Reference catalog ({PATTERNS.length} templates). Detection counts in cards are demo defaults; your repo is{" "}
+          Repo{" "}
           <span className="font-code text-gitlore-accent">{repoFull || "—"}</span>
           {repoPrimaryLang ? (
             <>
               {" "}
-              (primary language: <span className="font-code">{repoPrimaryLang}</span>)
+              · primary language <span className="font-code">{repoPrimaryLang}</span>
             </>
           ) : null}
-          .
+          . Counts under &ldquo;This repository&rdquo; come only from cached explanations you ran in Live repo; the catalog below is reference material, not a scanner.
         </p>
         {user && cachedPatternHits > 0 && (
-          <p className="mb-6 text-xs text-gitlore-text-secondary">
-            Cached AI explanations for this repo recorded{" "}
-            <span className="font-code text-gitlore-accent">{cachedPatternHits}</span> pattern mentions — see Overview for breakdown.
+          <p className="mb-4 text-xs text-gitlore-text-secondary">
+            Cached pattern mentions for this repo:{" "}
+            <span className="font-code text-gitlore-accent">{cachedPatternHits}</span> (same data as Overview).
           </p>
         )}
         {!user && (
-          <p className="mb-6 text-xs text-gitlore-text-secondary">Sign in to link stats to your connected repository.</p>
+          <p className="mb-6 text-xs text-gitlore-text-secondary">Sign in to load repository-backed pattern stats.</p>
         )}
 
-        {/* Search */}
+        <div className="mb-10">
+          <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
+            <div className="text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary">
+              This repository (from cached reviews)
+            </div>
+            {overviewLoading && <span className="text-xs text-gitlore-text-secondary">Loading…</span>}
+          </div>
+          <input
+            type="text"
+            placeholder="Filter detected themes…"
+            value={repoSearch}
+            onChange={(e) => setRepoSearch(e.target.value)}
+            className="mb-4 w-full max-w-md rounded-sm border border-gitlore-border bg-gitlore-code px-3 py-2 text-sm font-body text-gitlore-text outline-none transition-colors placeholder:text-gitlore-text-secondary/50 focus:border-gitlore-accent"
+          />
+          <FadeIn direction="up">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {!overviewLoading && filteredRepoAnti.length === 0 && (
+                <p className="col-span-full text-sm text-gitlore-text-secondary">
+                  No cached pattern themes yet. Use <span className="text-gitlore-text">Explain</span> on PR review comments or line analyze in Live repo; results aggregate here.
+                </p>
+              )}
+              {filteredRepoAnti.map((item) => (
+                <div
+                  key={item.text}
+                  className="flex flex-col rounded-sm border border-gitlore-border bg-gitlore-surface p-4"
+                >
+                  <div className="mb-2 flex items-start gap-2">
+                    <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.dot}`} />
+                    <span className="text-sm font-medium text-gitlore-text">{item.text}</span>
+                  </div>
+                  <div className="mt-auto font-code text-xs text-gitlore-text-secondary">
+                    Recorded <span className="text-gitlore-accent">{item.count}</span>{" "}
+                    {item.count === 1 ? "time" : "times"} in stored explanations
+                  </div>
+                </div>
+              ))}
+            </div>
+          </FadeIn>
+        </div>
+
+        <div className="mb-3 text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary">
+          Reference catalog ({REFERENCE_PATTERNS.length} examples)
+        </div>
         <input
           type="text"
-          placeholder="Filter patterns..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full max-w-md px-3 py-2 mb-8 text-sm font-body bg-gitlore-code border border-gitlore-border rounded-sm text-gitlore-text placeholder:text-gitlore-text-secondary/50 outline-none focus:border-gitlore-accent transition-colors"
+          placeholder="Filter reference examples…"
+          value={refSearch}
+          onChange={(e) => setRefSearch(e.target.value)}
+          className="mb-6 w-full max-w-md rounded-sm border border-gitlore-border bg-gitlore-code px-3 py-2 text-sm font-body text-gitlore-text outline-none transition-colors placeholder:text-gitlore-text-secondary/50 focus:border-gitlore-accent"
         />
 
-        {/* Grid */}
         <FadeIn direction="up">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {filtered.map((p) => (
-              <div key={p.name} className="pattern-card flex flex-col bg-gitlore-surface border border-gitlore-border rounded-sm p-4">
-              <div className="text-sm font-heading font-semibold text-gitlore-accent mb-2 leading-snug">
-                {p.name}
-              </div>
-
-              {/* Lang pills */}
-              <div className="flex flex-wrap gap-1.5 mb-3">
-                {p.langs.map((l) => (
-                  <span
-                    key={l}
-                    className="px-2 py-0.5 text-[10px] font-code text-gitlore-text-secondary bg-gitlore-border/40 rounded-sm"
-                  >
-                    {l}
-                  </span>
-                ))}
-              </div>
-
-              {p.anti ? (
-                <>
-                  <div className="text-[10px] uppercase tracking-wider text-gitlore-error/50 font-medium mb-1">
-                    Anti-pattern
-                  </div>
-                  <pre className="p-2 mb-3 text-sm leading-5 md:text-[11px] md:leading-4 font-code bg-gitlore-code border border-gitlore-border rounded-sm text-gitlore-text overflow-x-auto whitespace-pre">
-                    {p.anti}
-                  </pre>
-
-                  <div className="text-[10px] uppercase tracking-wider text-gitlore-success/50 font-medium mb-1">
-                    Correct pattern
-                  </div>
-                  <pre className="p-2 mb-3 text-sm leading-5 md:text-[11px] md:leading-4 font-code bg-gitlore-code border border-gitlore-border rounded-sm text-gitlore-text overflow-x-auto whitespace-pre">
-                    {p.correct}
-                  </pre>
-                </>
-              ) : (
-                <div className="flex-1" />
-              )}
-
-              {/* Detection bar */}
-              <div className="mt-auto pt-3">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-[10px] text-gitlore-text-secondary">
-                    Detected {p.detected} {p.detected === 1 ? "time" : "times"} in your repo
-                  </span>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {filteredRef.map((p) => (
+              <div key={p.name} className="pattern-card flex flex-col rounded-sm border border-gitlore-border bg-gitlore-surface p-4">
+                <div className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gitlore-text-secondary">
+                  Reference
                 </div>
-                <progress className="pattern-progress h-1 w-full" value={p.detected} max={p.maxBar} />
-              </div>
+                <div className="mb-2 text-sm font-heading font-semibold leading-snug text-gitlore-accent">{p.name}</div>
+
+                <div className="mb-3 flex flex-wrap gap-1.5">
+                  {p.langs.map((l) => (
+                    <span
+                      key={l}
+                      className="rounded-sm bg-gitlore-border/40 px-2 py-0.5 font-code text-[10px] text-gitlore-text-secondary"
+                    >
+                      {l}
+                    </span>
+                  ))}
+                </div>
+
+                {p.anti ? (
+                  <>
+                    <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-gitlore-error/50">Anti-pattern</div>
+                    <pre className="mb-3 overflow-x-auto whitespace-pre rounded-sm border border-gitlore-border bg-gitlore-code p-2 font-code text-sm leading-5 text-gitlore-text md:text-[11px] md:leading-4">
+                      {p.anti}
+                    </pre>
+                    <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-gitlore-success/50">Better pattern</div>
+                    <pre className="mb-3 overflow-x-auto whitespace-pre rounded-sm border border-gitlore-border bg-gitlore-code p-2 font-code text-sm leading-5 text-gitlore-text md:text-[11px] md:leading-4">
+                      {p.correct}
+                    </pre>
+                  </>
+                ) : (
+                  <div className="flex-1" />
+                )}
+
+                <div className="mt-auto border-t border-gitlore-border/60 pt-3 text-[10px] leading-snug text-gitlore-text-secondary">
+                  Not derived from your repository — for learning only.
+                </div>
               </div>
             ))}
           </div>

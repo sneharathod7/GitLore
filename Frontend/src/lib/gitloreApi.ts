@@ -197,17 +197,27 @@ export interface SearchResultItem {
   text: string;
   score: number;
   source?: string;
+  /** Present when returned from commit_cache (line analyze). */
+  filePath?: string;
+  line?: number;
 }
 
 export async function searchDecisions(repo: string, query: string, limit = 5): Promise<SearchResultItem[]> {
-  const raw = await postJSON<{ results: Array<{ one_liner: string; score: number; source: string }> }>(
-    "/api/search",
-    { repo, query, limit }
-  );
+  const raw = await postJSON<{
+    results: Array<{
+      one_liner: string;
+      score: number;
+      source: string;
+      file_path?: string;
+      line_number?: number;
+    }>;
+  }>("/api/search", { repo, query, limit });
   return (raw.results || []).map((r) => ({
     text: r.one_liner || "",
     score: Math.round((r.score || 0) * 100),
     source: r.source,
+    filePath: r.file_path,
+    line: r.line_number,
   }));
 }
 
@@ -296,6 +306,68 @@ export async function fetchRepoOverview(
 ): Promise<RepoOverviewResponse> {
   const q = branch ? `?branch=${encodeURIComponent(branch)}` : "";
   return getJSON<RepoOverviewResponse>(`/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${q}`);
+}
+
+export type GithubUserProfile = {
+  login: string;
+  name: string | null;
+  avatar_url: string;
+  public_repos: number;
+  followers: number;
+  following: number;
+  total_private_repos?: number;
+};
+
+export async function fetchGithubUserProfile(): Promise<GithubUserProfile> {
+  return getJSON<GithubUserProfile>("/api/user/github-profile");
+}
+
+export type RepoPullSummary = {
+  number: number;
+  title: string;
+  state: string;
+  updatedAt: string;
+  htmlUrl: string;
+  authorLogin: string | null;
+};
+
+export async function fetchRepoPullRequests(
+  owner: string,
+  name: string,
+  limit = 20
+): Promise<RepoPullSummary[]> {
+  const data = await getJSON<{ pulls: RepoPullSummary[] }>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls?limit=${limit}`
+  );
+  return data.pulls || [];
+}
+
+export type PullDiffReviewResponse = {
+  number: number;
+  title: string;
+  state: string;
+  authorLogin: string | null;
+  updatedAt: string;
+  htmlUrl: string;
+  diff: string;
+  comments: Array<{
+    id: number;
+    path: string;
+    line: number | null;
+    body: string;
+    author: string;
+    diff_hunk: string | null;
+  }>;
+};
+
+export async function fetchPullDiffReview(
+  owner: string,
+  name: string,
+  pullNumber: number
+): Promise<PullDiffReviewResponse> {
+  return getJSON<PullDiffReviewResponse>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${pullNumber}/diff-review`
+  );
 }
 
 export async function fetchRepoIndex(

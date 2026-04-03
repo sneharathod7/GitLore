@@ -34,6 +34,7 @@ explainRouter.post("/explain", async (c) => {
     // Parse and validate request
     const body = await c.req.json();
     const request = explainRequestSchema.parse(body);
+    const repoNorm = request.repo.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
 
     const cacheKey = `pr:${request.pr_number}:comment:${request.comment}:file:${request.file_path}:line:${request.line}`;
 
@@ -95,7 +96,7 @@ explainRouter.post("/explain", async (c) => {
       { _id: cacheKey } as any,
       {
         $set: {
-          repo: request.repo,
+          repo: repoNorm,
           explanation,
           created_at: new Date(),
           ttl: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
@@ -109,7 +110,7 @@ explainRouter.post("/explain", async (c) => {
       ...explanation,
       source: {
         comment_by: user.username,
-        comment_url: `https://github.com/${request.repo}/pull/${request.pr_number}`,
+        comment_url: `https://github.com/${repoNorm}/pull/${request.pr_number}`,
         pattern_matched: patternMatch?.pattern || null,
       },
       docs_links: [],

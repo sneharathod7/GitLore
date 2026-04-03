@@ -16,18 +16,15 @@ import {
   validateRepo,
   fetchRepoIndex,
   fetchRepoFileRaw,
+  fetchRepoPullRequests,
+  fetchPullDiffReview,
   type InsightExplanation,
   type InsightNarrative,
+  type RepoPullSummary,
 } from "@/lib/gitloreApi";
 import { pathsToFileTree, type FileNode } from "@/lib/pathsToFileTree";
+import { parseUnifiedDiff, diffLinesToHunkString, type ParsedDiffLine } from "@/lib/parseUnifiedDiff";
 import { startGithubOAuth } from "@/lib/githubOAuth";
-
-/* ─── Mock Data ─── */
-const MOCK_PRS = [
-  "PR #3: Fix user authentication flow",
-  "PR #7: Add rate limiting middleware",
-  "PR #12: Refactor payment service",
-];
 
 const FALLBACK_CODE = `// Select a file in the tree or set owner/repo/branch in the bar above.
 // File list is loaded from GitHub (GET /api/repo/.../index).`;
@@ -46,40 +43,15 @@ function getBlame(_line: number): string {
   return "Git blame \u00b7 use Analyze on a line for real history";
 }
 
-/* ─── Diff data ─── */
-interface DiffLine {
-  type: "context" | "added" | "removed" | "header";
-  content: string;
-  lineNum?: number;
-}
+type DiffLine = ParsedDiffLine;
 
-const DIFF_LINES: DiffLine[] = [
-  { type: "header", content: "@@ -10,6 +10,12 @@" },
-  { type: "context", content: " function UserProfile({ userId }) {", lineNum: 10 },
-  { type: "context", content: "   const [data, setData] = useState(null);", lineNum: 11 },
-  { type: "added", content: "+  useEffect(() => {", lineNum: 12 },
-  { type: "added", content: "+    fetch(`/api/users/${userId}`)", lineNum: 13 },
-  { type: "added", content: "+      .then(res => res.json())", lineNum: 14 },
-  { type: "added", content: "+      .then(data => setData(data));", lineNum: 15 },
-  { type: "added", content: "+  }, [userId]);", lineNum: 16 },
-  { type: "context", content: "   return <div>{data?.name}</div>;", lineNum: 17 },
-  { type: "context", content: " }", lineNum: 18 },
-];
-
-interface ReviewComment { line: number; text: string; author: string; }
-
-const COMMENTS: ReviewComment[] = [
-  { line: 12, text: "memory leak", author: "senior-dev" },
-  { line: 14, text: "N+1", author: "tech-lead" },
-  { line: 16, text: "missing error handling", author: "reviewer-3" },
-];
-
-/** Diff text sent with review-comment explain API */
-const DIFF_HUNK_STRING = DIFF_LINES.map((l) => l.content).join("\n");
-
-function parsePrNumber(prLabel: string): number {
-  const m = prLabel.match(/PR\s*#(\d+)/i);
-  return m ? parseInt(m[1], 10) : 1;
+interface ReviewComment {
+  id: number;
+  path: string;
+  line: number | null;
+  text: string;
+  author: string;
+  diff_hunk: string | null;
 }
 
 /* ─── Narrative / explanation panels ─── */
@@ -207,7 +179,19 @@ const FileTreeNode = ({
   );
 };
 
-const PRDropdown = ({ selected, onSelect }: { selected: string; onSelect: (pr: string) => void }) => {
+const PRDropdown = ({
+  pulls,
+  selectedNumber,
+  onSelect,
+  loading,
+  emptyHint,
+}: {
+  pulls: RepoPullSummary[];
+  selectedNumber: number | null;
+  onSelect: (n: number) => void;
+  loading: boolean;
+  emptyHint: string;
+}) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -219,23 +203,45 @@ const PRDropdown = ({ selected, onSelect }: { selected: string; onSelect: (pr: s
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  const selected = pulls.find((p) => p.number === selectedNumber);
+  const label = loading
+    ? "Loading PRs…"
+    : selected
+      ? `PR #${selected.number}: ${selected.title}`
+      : pulls.length === 0
+        ? emptyHint
+        : "Select a PR";
+
   return (
     <div ref={ref} className="relative">
       <button
+        type="button"
+        disabled={loading || pulls.length === 0}
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between px-3 py-2 text-sm font-code bg-gitlore-code border border-gitlore-border rounded-sm text-gitlore-text hover:bg-gitlore-surface-hover transition-colors"
+        className="flex w-full items-center justify-between rounded-sm border border-gitlore-border bg-gitlore-code px-3 py-2 text-left text-sm font-code text-gitlore-text transition-colors hover:bg-gitlore-surface-hover disabled:cursor-not-allowed disabled:opacity-60"
       >
-        <span className="truncate">{selected}</span>
-        <svg className={`w-4 h-4 ml-2 shrink-0 text-gitlore-text-secondary transition-transform ${open ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <span className="truncate">{label}</span>
+        <svg className={`ml-2 h-4 w-4 shrink-0 text-gitlore-text-secondary transition-transform ${open ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      {open && (
-        <div className="absolute z-50 mt-1 w-full bg-gitlore-surface border border-gitlore-border rounded-sm overflow-hidden">
-          {MOCK_PRS.map((pr) => (
-            <button key={pr} onClick={() => { onSelect(pr); setOpen(false); }}
-              className={`w-full text-left px-3 py-2 text-sm font-code transition-colors ${pr === selected ? "bg-gitlore-accent/10 text-gitlore-accent" : "text-gitlore-text hover:bg-gitlore-surface-hover"}`}
-            >{pr}</button>
+      {open && pulls.length > 0 && (
+        <div className="absolute z-50 mt-1 max-h-64 w-full overflow-y-auto rounded-sm border border-gitlore-border bg-gitlore-surface">
+          {pulls.map((pr) => (
+            <button
+              key={pr.number}
+              type="button"
+              onClick={() => {
+                onSelect(pr.number);
+                setOpen(false);
+              }}
+              className={`w-full px-3 py-2 text-left text-sm font-code transition-colors ${
+                pr.number === selectedNumber ? "bg-gitlore-accent/10 text-gitlore-accent" : "text-gitlore-text hover:bg-gitlore-surface-hover"
+              }`}
+            >
+              <span className="text-gitlore-text-secondary">#{pr.number}</span> {pr.title}{" "}
+              <span className="text-xs text-gitlore-text-secondary">({pr.state})</span>
+            </button>
           ))}
         </div>
       )}
@@ -243,10 +249,18 @@ const PRDropdown = ({ selected, onSelect }: { selected: string; onSelect: (pr: s
   );
 };
 
-const DiffViewer = ({ onCommentClick, onLineClick, activeComment }: {
+const DiffViewer = ({
+  lines,
+  comments,
+  onCommentClick,
+  onLineClick,
+  activeCommentId,
+}: {
+  lines: DiffLine[];
+  comments: ReviewComment[];
   onCommentClick: (comment: ReviewComment) => void;
   onLineClick: (lineNum: number, el: HTMLElement) => void;
-  activeComment: string | null;
+  activeCommentId: number | null;
 }) => {
   const badgesRef = useRef<HTMLDivElement>(null);
 
@@ -255,7 +269,6 @@ const DiffViewer = ({ onCommentClick, onLineClick, activeComment }: {
     if (!root) return;
     const badges = root.querySelectorAll(".comment-badge");
     if (!badges.length) return;
-    // Anime.js v4: animate(targets, params) — not a single { targets, ... } object (v3).
     const anim = animeAnimate(badges, {
       scale: [1, 1.05, 1],
       opacity: [0.8, 1, 0.8],
@@ -266,40 +279,62 @@ const DiffViewer = ({ onCommentClick, onLineClick, activeComment }: {
     return () => {
       anim.revert();
     };
-  }, []);
+  }, [lines, comments]);
+
+  if (!lines.length) {
+    return (
+      <p className="text-sm text-gitlore-text-secondary">
+        No diff loaded. Choose a pull request with changes, or check repo access.
+      </p>
+    );
+  }
 
   return (
     <div className="w-full overflow-hidden md:overflow-x-auto md:overscroll-x-contain">
       <div ref={badgesRef} className="min-w-0 w-full font-code text-xs md:w-max md:min-w-full md:text-sm md:max-lg:text-[13px]">
-        {DIFF_LINES.map((line, i) => {
-          const commentsOnLine = COMMENTS.filter((c) => c.line === line.lineNum);
+        {lines.map((line, i) => {
+          const commentsOnLine = comments.filter((c) => {
+            if (c.line == null || line.lineNum == null || c.line !== line.lineNum) return false;
+            if (!line.path || !c.path) return true;
+            return c.path === line.path;
+          });
           return (
             <div key={i} className="min-w-0">
               <div
                 className={`diff-line flex w-full min-w-0 cursor-pointer items-start ${
-                  line.type === "added" ? "bg-[rgba(46,204,113,0.08)]"
-                  : line.type === "removed" ? "bg-[rgba(231,76,60,0.08)]" : ""
+                  line.type === "added"
+                    ? "bg-[rgba(46,204,113,0.08)]"
+                    : line.type === "removed"
+                      ? "bg-[rgba(231,76,60,0.08)]"
+                      : ""
                 } md:w-max md:min-w-full`}
-                onClick={(e) => { if (line.lineNum) onLineClick(line.lineNum, e.currentTarget); }}
+                onClick={(e) => {
+                  if (line.lineNum) onLineClick(line.lineNum, e.currentTarget);
+                }}
               >
                 <span className="w-10 shrink-0 select-none pr-2 text-right text-[11px] leading-6 text-gitlore-text-secondary/50 md:w-12 md:pr-3 md:text-xs">
                   {line.type === "header" ? "" : line.lineNum}
                 </span>
-                <pre className={`min-w-0 flex-1 whitespace-pre-wrap break-words leading-6 text-gitlore-text md:flex-none md:shrink-0 md:whitespace-pre ${
-                  line.type === "header" ? "text-gitlore-text-secondary/60 italic" : ""
-                }`}>{line.content}</pre>
+                <pre
+                  className={`min-w-0 flex-1 whitespace-pre-wrap break-words leading-6 text-gitlore-text md:flex-none md:shrink-0 md:whitespace-pre ${
+                    line.type === "header" ? "text-gitlore-text-secondary/60 italic" : ""
+                  }`}
+                >
+                  {line.content}
+                </pre>
               </div>
               {commentsOnLine.map((comment) => (
                 <button
-                  key={comment.text}
+                  key={comment.id}
+                  type="button"
                   onClick={() => onCommentClick(comment)}
-                  className={`comment-badge ml-10 mr-2 my-1 flex w-[calc(100%-3rem)] flex-wrap items-center gap-2 rounded-sm border px-3 py-1 text-left text-[11px] transition-colors cursor-pointer md:ml-12 md:mr-0 md:inline-flex md:w-auto md:text-xs ${
-                    activeComment === comment.text
-                      ? "bg-gitlore-accent/15 border-gitlore-accent/40 text-gitlore-accent"
-                      : "bg-gitlore-error/10 border-gitlore-error/20 text-gitlore-error hover:bg-gitlore-error/15"
+                  className={`comment-badge my-1 ml-10 mr-2 flex w-[calc(100%-3rem)] cursor-pointer flex-wrap items-center gap-2 rounded-sm border px-3 py-1 text-left text-[11px] transition-colors md:ml-12 md:mr-0 md:inline-flex md:w-auto md:text-xs ${
+                    activeCommentId === comment.id
+                      ? "border-gitlore-accent/40 bg-gitlore-accent/15 text-gitlore-accent"
+                      : "border-gitlore-error/20 bg-gitlore-error/10 text-gitlore-error hover:bg-gitlore-error/15"
                   }`}
                 >
-                  <span className="font-semibold">{comment.text}</span>
+                  <span className="font-semibold line-clamp-2">{comment.text}</span>
                   <span className="break-all text-gitlore-text-secondary">@{comment.author}</span>
                 </button>
               ))}
@@ -311,11 +346,13 @@ const DiffViewer = ({ onCommentClick, onLineClick, activeComment }: {
   );
 };
 
+const TIMELINE_FONT = 'Inter, system-ui, sans-serif';
+
 const StoryTimeline = ({ dots }: { dots: TimelineDot[] }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerWidth = 320;
   const dotR = 6;
-  const spacing = (containerWidth - 40) / (dots.length - 1);
+  const spacing = dots.length > 1 ? (containerWidth - 40) / (dots.length - 1) : 0;
 
   useEffect(() => {
     if (!svgRef.current) return;
@@ -327,17 +364,25 @@ const StoryTimeline = ({ dots }: { dots: TimelineDot[] }) => {
   }, []);
 
   return (
-    <div className="overflow-x-auto -mx-1 px-1">
+    <div className="-mx-1 overflow-x-auto px-1">
       <svg ref={svgRef} viewBox={`0 0 ${containerWidth} 100`} className="block w-full max-w-[520px]" preserveAspectRatio="xMidYMid meet">
-        <line x1={20} y1={20} x2={20 + spacing * (dots.length - 1)} y2={20} stroke="#2A2A3A" strokeWidth={2} />
+        {dots.length > 1 && (
+          <line x1={20} y1={20} x2={20 + spacing * (dots.length - 1)} y2={20} stroke="#2A2A3A" strokeWidth={2} />
+        )}
         {dots.map((dot, i) => {
-          const cx = 20 + i * spacing;
+          const cx = dots.length > 1 ? 20 + i * spacing : containerWidth / 2;
           return (
             <g key={i}>
               <circle className="timeline-dot" cx={cx} cy={20} r={dotR} fill={dot.color} />
-              <text x={cx} y={42} textAnchor="middle" fill="#E8E8ED" fontSize={11} fontFamily="'Inter', sans-serif" fontWeight={500}>{dot.label}</text>
-              <text x={cx} y={56} textAnchor="middle" fill="#8888A0" fontSize={10} fontFamily="'Inter', sans-serif">{dot.sublabel}</text>
-              <text x={cx} y={70} textAnchor="middle" fill="#8888A0" fontSize={10} fontFamily="'Inter', sans-serif" fontStyle="italic">{dot.date}</text>
+              <text x={cx} y={42} textAnchor="middle" fill="var(--text)" fontSize={12} fontFamily={TIMELINE_FONT} fontWeight={500}>
+                {dot.label}
+              </text>
+              <text x={cx} y={56} textAnchor="middle" fill="var(--text-secondary)" fontSize={11} fontFamily={TIMELINE_FONT}>
+                {dot.sublabel}
+              </text>
+              <text x={cx} y={70} textAnchor="middle" fill="var(--text-secondary)" fontSize={11} fontFamily={TIMELINE_FONT} fontStyle="italic">
+                {dot.date}
+              </text>
             </g>
           );
         })}
@@ -349,30 +394,34 @@ const StoryTimeline = ({ dots }: { dots: TimelineDot[] }) => {
 const NarrativePanel = ({ narrative, line }: { narrative: InsightNarrative | null; line: number | null }) => {
   if (!narrative) {
     return (
-      <div className="flex items-center justify-center h-full p-8">
-        <p className="text-sm text-gitlore-text-secondary text-center leading-relaxed">Click a line to see its story</p>
+      <div className="flex h-full items-center justify-center p-8">
+        <p className="text-center font-body text-sm leading-relaxed text-gitlore-text-secondary">Click a line to see its story</p>
       </div>
     );
   }
   return (
-    <div className="p-4 md:p-5 space-y-4 md:space-y-5">
+    <div className="space-y-5 p-4 font-body md:p-5">
       <div className="flex items-start justify-between gap-3">
-        <p className="text-sm lg:text-base font-heading font-semibold text-gitlore-text leading-snug md:max-lg:text-[15px]">{narrative.oneLiner}</p>
-        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-sm border border-gitlore-border text-gitlore-success shrink-0">
-          <span className="w-1.5 h-1.5 rounded-full bg-gitlore-success" />{narrative.confidence}
+        <p className="text-base font-semibold leading-snug text-gitlore-text">{narrative.oneLiner}</p>
+        <span className="inline-flex shrink-0 items-center gap-1.5 rounded-sm border border-gitlore-border px-2 py-0.5 text-xs font-medium text-gitlore-success">
+          <span className="h-1.5 w-1.5 rounded-full bg-gitlore-success" />
+          {narrative.confidence}
         </span>
       </div>
-      {line !== null && <div className="text-sm text-gitlore-text-secondary">Line {line} -- Narrative</div>}
+      {line !== null && <div className="text-xs text-gitlore-text-secondary">Line {line} · narrative</div>}
       <StoryTimeline dots={narrative.timeline} />
       <div>
-        <div className="text-xs font-medium text-gitlore-text-secondary uppercase tracking-wider mb-1.5">The Debate</div>
-        <p className="text-sm text-gitlore-text leading-relaxed md:max-lg:text-[13px] lg:text-[15px]">{narrative.debate}</p>
+        <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-gitlore-text-secondary">The debate</div>
+        <p className="text-sm leading-relaxed text-gitlore-text">{narrative.debate}</p>
       </div>
-      <div className="px-3 py-2.5 bg-gitlore-success/10 border border-gitlore-success/20 rounded-sm">
-        <div className="text-xs font-medium text-gitlore-success mb-1">Impact</div>
-        <div className="text-sm text-gitlore-text md:max-lg:text-[13px] lg:text-[15px]">{narrative.impact}</div>
+      <div className="rounded-sm border border-gitlore-success/20 bg-gitlore-success/10 px-3 py-2.5">
+        <div className="mb-1 text-[11px] font-medium text-gitlore-success">Impact</div>
+        <div className="text-sm leading-relaxed text-gitlore-text">{narrative.impact}</div>
       </div>
-      <button className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium border border-gitlore-accent text-gitlore-accent rounded-sm hover:bg-gitlore-accent/10 transition-colors">
+      <button
+        type="button"
+        className="inline-flex items-center gap-2 rounded-sm border border-gitlore-accent px-4 py-2 text-sm font-medium text-gitlore-accent transition-colors hover:bg-gitlore-accent/10"
+      >
         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M15.536 8.464a5 5 0 010 7.072M12 6.253v11.494M18.364 5.636a9 9 0 010 12.728M8.464 15.536a5 5 0 010-7.072M5.636 18.364a9 9 0 010-12.728" />
         </svg>
@@ -383,42 +432,64 @@ const NarrativePanel = ({ narrative, line }: { narrative: InsightNarrative | nul
 };
 
 const SplitDiffView = ({ buggyCode, fixedCode }: { buggyCode: string; fixedCode: string }) => (
-  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
     <div className="min-w-0">
-      <div className="text-xs font-medium text-gitlore-error mb-1.5 uppercase tracking-wider">Your code</div>
-      <pre className="p-3 text-sm md:text-xs leading-5 font-code bg-[rgba(231,76,60,0.08)] border border-gitlore-error/20 rounded-sm text-gitlore-text overflow-x-auto whitespace-pre">{buggyCode}</pre>
+      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-gitlore-error">Your code</div>
+      <pre className="overflow-x-auto whitespace-pre rounded-sm border border-gitlore-error/20 bg-[rgba(231,76,60,0.08)] p-3 font-code text-xs leading-5 text-gitlore-text">
+        {buggyCode}
+      </pre>
     </div>
     <div className="min-w-0">
-      <div className="text-xs font-medium text-gitlore-success mb-1.5 uppercase tracking-wider">Fixed</div>
-      <pre className="p-3 text-sm md:text-xs leading-5 font-code bg-[rgba(46,204,113,0.08)] border border-gitlore-success/20 rounded-sm text-gitlore-text overflow-x-auto whitespace-pre">{fixedCode}</pre>
+      <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-gitlore-success">Fixed</div>
+      <pre className="overflow-x-auto whitespace-pre rounded-sm border border-gitlore-success/20 bg-[rgba(46,204,113,0.08)] p-3 font-code text-xs leading-5 text-gitlore-text">
+        {fixedCode}
+      </pre>
     </div>
   </div>
 );
 
 const ExplanationPanel = ({ explanation }: { explanation: InsightExplanation | null }) => {
   if (!explanation) return null;
-  const confidenceColor = explanation.confidence === "HIGH" ? "text-gitlore-success" : explanation.confidence === "MEDIUM" ? "text-gitlore-warning" : "text-gitlore-error";
-  const dotColor = explanation.confidence === "HIGH" ? "bg-gitlore-success" : explanation.confidence === "MEDIUM" ? "bg-gitlore-warning" : "bg-gitlore-error";
+  const confidenceColor =
+    explanation.confidence === "HIGH"
+      ? "text-gitlore-success"
+      : explanation.confidence === "MEDIUM"
+        ? "text-gitlore-warning"
+        : "text-gitlore-error";
+  const dotColor =
+    explanation.confidence === "HIGH"
+      ? "bg-gitlore-success"
+      : explanation.confidence === "MEDIUM"
+        ? "bg-gitlore-warning"
+        : "bg-gitlore-error";
 
   return (
-    <div className="p-4 md:p-5 space-y-4 md:space-y-5">
+    <div className="space-y-5 p-4 font-body md:p-5">
       <div className="flex items-start justify-between gap-3">
-        <h3 className="text-sm lg:text-base font-heading font-semibold text-gitlore-accent md:max-lg:text-[15px]">{explanation.header}</h3>
-        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-sm border border-gitlore-border ${confidenceColor}`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />{explanation.confidence}
+        <h3 className="text-base font-semibold leading-snug text-gitlore-accent">{explanation.header}</h3>
+        <span
+          className={`inline-flex shrink-0 items-center gap-1.5 rounded-sm border border-gitlore-border px-2 py-0.5 text-xs font-medium ${confidenceColor}`}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`} />
+          {explanation.confidence}
         </span>
       </div>
       <SplitDiffView buggyCode={explanation.buggyCode} fixedCode={explanation.fixedCode} />
       <div>
-        <div className="text-xs font-medium text-gitlore-text-secondary uppercase tracking-wider mb-1.5">Why it matters</div>
-        <p className="text-sm text-gitlore-text leading-relaxed md:max-lg:text-[13px] lg:text-[15px]">{explanation.why}</p>
+        <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-gitlore-text-secondary">Why it matters</div>
+        <p className="text-sm leading-relaxed text-gitlore-text">{explanation.why}</p>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="text-gitlore-text-secondary">Principle:</span>
-        <span className="text-gitlore-text font-medium">{explanation.principle}</span>
+        <span className="text-gitlore-text-secondary">Principle</span>
+        <span className="font-medium text-gitlore-text">{explanation.principle}</span>
       </div>
-      <a href={`https://${explanation.link}`} target="_blank" rel="noopener noreferrer" className="inline-block text-sm text-gitlore-text-secondary hover:text-gitlore-accent transition-colors break-all">
-        {explanation.link} &rarr;
+      <a
+        href={explanation.link.startsWith("http") ? explanation.link : `https://${explanation.link}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-block break-all text-sm text-gitlore-text-secondary transition-colors hover:text-gitlore-accent"
+      >
+        {explanation.link} →
       </a>
     </div>
   );
@@ -446,7 +517,14 @@ const AppView = () => {
   const [sourceCode, setSourceCode] = useState(FALLBACK_CODE);
   const [fileLoading, setFileLoading] = useState(false);
   const [mobileCodeWrap, setMobileCodeWrap] = useState(true);
-  const [selectedPR, setSelectedPR] = useState(MOCK_PRS[0]);
+  const [pulls, setPulls] = useState<RepoPullSummary[]>([]);
+  const [selectedPrNumber, setSelectedPrNumber] = useState<number | null>(null);
+  const [prListLoading, setPrListLoading] = useState(false);
+  const [diffLines, setDiffLines] = useState<DiffLine[]>([]);
+  const [reviewComments, setReviewComments] = useState<ReviewComment[]>([]);
+  const [prDiffLoading, setPrDiffLoading] = useState(false);
+  const [prDiffErr, setPrDiffErr] = useState<string | null>(null);
+  const [explanationCommentId, setExplanationCommentId] = useState<number | null>(null);
   const [panel, setPanel] = useState<PanelContent>({ type: "idle" });
   const [insightLoading, setInsightLoading] = useState(false);
   const [repoCheckMsg, setRepoCheckMsg] = useState<string | null>(null);
@@ -454,6 +532,12 @@ const AppView = () => {
   const [leftTab, setLeftTab] = useState<LeftTab>("code");
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
   const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
+  /** Open narrative from navbar Decisions search after file content loads. */
+  const [pendingDecisionOpen, setPendingDecisionOpen] = useState<{ file: string; line: number } | null>(null);
+
+  useEffect(() => {
+    setExplanationCommentId(null);
+  }, [selectedPrNumber]);
 
   const cmTheme = useMemo(() => buildCmTheme(isMobile, mobileCodeWrap), [isMobile, mobileCodeWrap]);
   const cmExtensions = useMemo(
@@ -472,12 +556,124 @@ const AppView = () => {
   );
 
   useEffect(() => {
-    const st = location.state as { file?: string } | null;
-    if (st?.file) {
-      setTarget({ filePath: st.file });
-      navigate(location.pathname, { replace: true, state: {} });
+    const st = location.state as { file?: string; analyzeLine?: number } | null;
+    if (!st?.file) return;
+    setTarget({ filePath: st.file });
+    setLeftTab("code");
+    if (typeof st.analyzeLine === "number" && st.analyzeLine > 0) {
+      setPendingDecisionOpen({ file: st.file, line: st.analyzeLine });
     }
+    navigate(location.pathname, { replace: true, state: {} });
   }, [location.state, location.pathname, navigate, setTarget]);
+
+  useEffect(() => {
+    if (!pendingDecisionOpen || !user || !repoReady || fileLoading) return;
+    if (target.filePath !== pendingDecisionOpen.file) return;
+
+    const { line } = pendingDecisionOpen;
+    setPendingDecisionOpen(null);
+
+    let cancelled = false;
+    setPanelOpen(true);
+    setInsightLoading(true);
+    setPanel({ type: "idle" });
+    setSelectedLine(line);
+    void (async () => {
+      try {
+        const data = await analyzeLine({
+          repo: repoFull,
+          file_path: target.filePath,
+          line_number: line,
+          branch: target.branch,
+        });
+        if (!cancelled) setPanel({ type: "narrative", line, data });
+      } catch (e) {
+        if (!cancelled) {
+          setPanel({ type: "error", message: e instanceof Error ? e.message : "Analyze request failed" });
+        }
+      } finally {
+        if (!cancelled) setInsightLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingDecisionOpen, fileLoading, user, repoReady, target.filePath, target.branch, repoFull]);
+
+  useEffect(() => {
+    if (!user || !repoReady) {
+      setPulls([]);
+      setSelectedPrNumber(null);
+      setPrListLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPrListLoading(true);
+    void fetchRepoPullRequests(target.owner, target.name, 25)
+      .then((list) => {
+        if (cancelled) return;
+        setPulls(list);
+        setSelectedPrNumber((prev) => {
+          if (prev != null && list.some((p) => p.number === prev)) return prev;
+          return list[0]?.number ?? null;
+        });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPulls([]);
+          setSelectedPrNumber(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPrListLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, repoReady, target.owner, target.name]);
+
+  useEffect(() => {
+    if (!user || !repoReady || selectedPrNumber == null) {
+      setDiffLines([]);
+      setReviewComments([]);
+      setPrDiffErr(null);
+      setPrDiffLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPrDiffLoading(true);
+    setPrDiffErr(null);
+    void fetchPullDiffReview(target.owner, target.name, selectedPrNumber)
+      .then((bundle) => {
+        if (cancelled) return;
+        const parsed = parseUnifiedDiff(bundle.diff || "");
+        setDiffLines(parsed);
+        setReviewComments(
+          bundle.comments.map((c) => ({
+            id: c.id,
+            path: c.path,
+            line: c.line,
+            text: c.body,
+            author: c.author,
+            diff_hunk: c.diff_hunk,
+          }))
+        );
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setDiffLines([]);
+          setReviewComments([]);
+          setPrDiffErr(e instanceof Error ? e.message : "Failed to load PR diff");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPrDiffLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, repoReady, target.owner, target.name, selectedPrNumber]);
 
   useEffect(() => {
     if (!user || !repoReady) {
@@ -581,18 +777,24 @@ const AppView = () => {
         setPanelOpen(true);
         return;
       }
+      if (selectedPrNumber == null) return;
+      const lineNo = comment.line ?? 1;
       setPanelOpen(true);
       setInsightLoading(true);
       setPanel({ type: "idle" });
+      setExplanationCommentId(null);
       try {
+        const diffPayload =
+          (comment.diff_hunk && comment.diff_hunk.trim()) || diffLinesToHunkString(diffLines);
         const data = await explainComment({
           comment: comment.text,
-          diff_hunk: DIFF_HUNK_STRING,
-          file_path: target.filePath || "demo.tsx",
-          line: comment.line,
+          diff_hunk: diffPayload || "(no diff hunk)",
+          file_path: comment.path || target.filePath || "file",
+          line: lineNo,
           repo: repoFull,
-          pr_number: parsePrNumber(selectedPR),
+          pr_number: selectedPrNumber,
         });
+        setExplanationCommentId(comment.id);
         setPanel({ type: "explanation", data });
       } catch (e) {
         setPanel({ type: "error", message: e instanceof Error ? e.message : "Explain request failed" });
@@ -600,7 +802,7 @@ const AppView = () => {
         setInsightLoading(false);
       }
     },
-    [user, repoFull, selectedPR, target.filePath]
+    [user, repoFull, selectedPrNumber, target.filePath, diffLines]
   );
 
   const handleLineClickAnime = useCallback(
@@ -652,11 +854,11 @@ const AppView = () => {
   const panelUI =
     insightLoading ? (
       <div className="flex h-full items-center justify-center p-8">
-        <p className="text-center text-sm text-gitlore-text-secondary">Loading insight…</p>
+        <p className="text-center font-body text-sm text-gitlore-text-secondary">Loading insight…</p>
       </div>
     ) : panel.type === "need-auth" ? (
       <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
-        <p className="text-center text-sm text-gitlore-text-secondary">
+        <p className="text-center font-body text-sm leading-relaxed text-gitlore-text-secondary">
           Sign in with GitHub to run blame narratives and review explanations against the configured repository.
         </p>
         <button
@@ -668,8 +870,8 @@ const AppView = () => {
         </button>
       </div>
     ) : panel.type === "error" ? (
-      <div className="p-5">
-        <p className="text-sm text-gitlore-error">{panel.message}</p>
+      <div className="p-5 font-body">
+        <p className="text-sm leading-relaxed text-gitlore-error">{panel.message}</p>
       </div>
     ) : panel.type === "explanation" ? (
       <ExplanationPanel explanation={panel.data} />
@@ -677,7 +879,7 @@ const AppView = () => {
       <NarrativePanel narrative={panel.data} line={panel.line} />
     ) : (
       <div className="flex h-full items-center justify-center p-8">
-        <p className="text-center text-sm text-gitlore-text-secondary">
+        <p className="text-center font-body text-sm leading-relaxed text-gitlore-text-secondary">
           {leftTab === "code"
             ? "Click a line to analyze the configured file path with Git blame (see bar above)."
             : "Click a review comment to get an AI explanation via the API."}
@@ -705,12 +907,6 @@ const AppView = () => {
     </>
   );
 
-  const mobileBlameRanges = [
-    { range: "1–5", label: "teammate-b · 3 months ago" },
-    { range: "6–10", label: "teammate-a · 8 months ago" },
-    { range: "11–20", label: "teammate-b · 3 months ago" },
-    { range: "21–28", label: "teammate-c · 1 year ago" },
-  ];
 
   const selectedBlame = selectedLine ? getBlame(selectedLine) : null;
 
@@ -760,7 +956,13 @@ const AppView = () => {
         <div className="space-y-3 border-t border-gitlore-border px-3 pb-3 pt-2">
           <div>
             <div className="text-xs text-gitlore-text-secondary uppercase tracking-wider mb-2 font-medium">Pull Request</div>
-            <PRDropdown selected={selectedPR} onSelect={setSelectedPR} />
+            <PRDropdown
+              pulls={pulls}
+              selectedNumber={selectedPrNumber}
+              onSelect={setSelectedPrNumber}
+              loading={prListLoading}
+              emptyHint="No PRs in this repo"
+            />
           </div>
           <div>
             <div className="text-xs text-gitlore-text-secondary uppercase tracking-wider mb-2 px-1 font-medium">Files</div>
@@ -852,7 +1054,13 @@ const AppView = () => {
     <aside className="flex h-full w-full flex-col overflow-auto bg-gitlore-surface md:border-r md:border-gitlore-border">
       <div className="p-3 border-b border-gitlore-border">
         <div className="text-xs text-gitlore-text-secondary uppercase tracking-wider mb-2 font-medium md:max-lg:text-[11px]">Pull Request</div>
-        <PRDropdown selected={selectedPR} onSelect={setSelectedPR} />
+        <PRDropdown
+          pulls={pulls}
+          selectedNumber={selectedPrNumber}
+          onSelect={setSelectedPrNumber}
+          loading={prListLoading}
+          emptyHint="No PRs in this repo"
+        />
       </div>
       <div className="p-2">
         <div className="text-xs text-gitlore-text-secondary uppercase tracking-wider mb-2 px-2 font-medium md:max-lg:text-[11px]">Files</div>
@@ -988,14 +1196,6 @@ const AppView = () => {
                       </div>
                     )}
                   </div>
-                  <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
-                    {mobileBlameRanges.map((item) => (
-                      <div key={item.range} className="shrink-0 rounded-sm border border-gitlore-border bg-gitlore-code px-2.5 py-1.5">
-                        <div className="font-code text-[10px] text-gitlore-accent">{item.range}</div>
-                        <div className="font-code text-[10px] text-gitlore-text-secondary">{item.label}</div>
-                      </div>
-                    ))}
-                  </div>
                   <div className="mt-3 flex items-center gap-2 border-t border-gitlore-border/60 pt-2.5">
                     <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-gitlore-text-secondary">Code lines</span>
                     <div className="ml-auto flex rounded-sm border border-gitlore-border p-0.5 font-code text-[10px] font-medium">
@@ -1023,7 +1223,17 @@ const AppView = () => {
             ) : (
               <div className="h-full overflow-auto p-3">
                 <div className="mb-3 text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary md:max-lg:text-[11px]">Changes</div>
-                <DiffViewer onCommentClick={handleCommentClick} onLineClick={handleDiffLineClick} activeComment={panel.type === "explanation" ? null : null} />
+                {prDiffLoading && <p className="text-sm text-gitlore-text-secondary">Loading pull request diff…</p>}
+                {prDiffErr && <p className="text-sm text-gitlore-error">{prDiffErr}</p>}
+                {!prDiffLoading && !prDiffErr && (
+                  <DiffViewer
+                    lines={diffLines}
+                    comments={reviewComments}
+                    onCommentClick={handleCommentClick}
+                    onLineClick={handleDiffLineClick}
+                    activeCommentId={panel.type === "explanation" ? explanationCommentId : null}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1077,7 +1287,17 @@ const AppView = () => {
                       <div className="min-h-0 flex-1 overflow-auto">
                         <div className="w-full min-w-0 p-3 md:p-4">
                           <div className="mb-3 text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary md:max-lg:text-[11px]">Changes</div>
-                          <DiffViewer onCommentClick={handleCommentClick} onLineClick={handleDiffLineClick} activeComment={panel.type === "explanation" ? null : null} />
+                          {prDiffLoading && <p className="text-sm text-gitlore-text-secondary">Loading pull request diff…</p>}
+                          {prDiffErr && <p className="text-sm text-gitlore-error">{prDiffErr}</p>}
+                          {!prDiffLoading && !prDiffErr && (
+                            <DiffViewer
+                              lines={diffLines}
+                              comments={reviewComments}
+                              onCommentClick={handleCommentClick}
+                              onLineClick={handleDiffLineClick}
+                              activeCommentId={panel.type === "explanation" ? explanationCommentId : null}
+                            />
+                          )}
                         </div>
                       </div>
                     )}
@@ -1088,7 +1308,7 @@ const AppView = () => {
               <Panel id="insight" defaultSize="37%" minSize="18%" maxSize="55%" className="min-h-0 min-w-0">
                 <div
                   ref={desktopPanelRef}
-                  className="h-full overflow-auto bg-gitlore-surface"
+                  className="h-full overflow-auto border-l border-gitlore-border bg-gitlore-surface"
                 >
                   {panelUI}
                 </div>

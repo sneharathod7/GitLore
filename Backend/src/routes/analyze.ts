@@ -32,7 +32,8 @@ analyzeRouter.post("/analyze", async (c) => {
     const body = await c.req.json();
     const request = analyzeRequestSchema.parse(body);
 
-    const [owner, repo] = request.repo.split("/");
+    const repoNorm = request.repo.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
+    const [owner, repo] = repoNorm.split("/");
     if (!owner || !repo) {
       return c.json({ error: "Invalid repo format (use owner/name)" }, 400);
     }
@@ -198,7 +199,7 @@ analyzeRouter.post("/analyze", async (c) => {
       { _id: cacheKey } as any,
       {
         $set: {
-          repo: request.repo,
+          repo: repoNorm,
           file_path: request.file_path,
           line_number: request.line_number,
           sha: commit.oid,
