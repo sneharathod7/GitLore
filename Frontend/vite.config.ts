@@ -5,28 +5,28 @@ import path from "path";
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  // Must match Backend PORT in Backend/.env (default 3001)
+  // Must match gitLore_backend PORT (see backend .env). Example: http://127.0.0.1:3002
   const apiOrigin = env.VITE_API_ORIGIN || "http://127.0.0.1:3001";
 
   return {
-    server: {
-      host: "::",
-      port: 8080,
-      hmr: {
-        overlay: false,
-      },
-      proxy: {
-        "/auth": { target: apiOrigin, changeOrigin: true },
-        "/api": { target: apiOrigin, changeOrigin: true },
-        "/health": { target: apiOrigin, changeOrigin: true },
-      },
+  server: {
+    host: "::",
+    port: 8080,
+    hmr: {
+      overlay: false,
     },
-    plugins: [react()],
-    resolve: {
-      alias: {
-        "@": path.resolve(__dirname, "./src"),
-      },
-      dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
+    proxy: {
+      "/auth": { target: apiOrigin, changeOrigin: true },
+      "/api": { target: apiOrigin, changeOrigin: true },
+      "/health": { target: apiOrigin, changeOrigin: true },
     },
-  };
+  },
+  plugins: [react()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
+  },
+};
 });
