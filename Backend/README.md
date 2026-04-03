@@ -12,4 +12,10 @@ npm install
 cp .env.example .env
 ```
 
-Configure OAuth and MongoDB as in `.env.example`. With a valid session cookie, `GET /api/repo/:owner/:name` and related routes are available.
+Set at least `MONGODB_URI`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_CALLBACK_URL`, and `SESSION_SECRET` to exercise OAuth. See `.env.example`.
+
+CORS uses an explicit allowlist (not `*`) so cookies work once OAuth lands. Override with `CORS_ORIGIN` (comma-separated) if the frontend runs on another host or port.
+
+`/test/env-check` is disabled when `NODE_ENV=production`.
+
+See `.env.example` for variables required by later PRs.

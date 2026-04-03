@@ -11,12 +11,25 @@ import { narrateRouter } from "./routes/narrate";
 import { repoRouter } from "./routes/repo";
 import { testRouter } from "./routes/test";
 
+/** Comma-separated in CORS_ORIGIN; first entry is default for non-browser clients. */
+function allowedCorsOrigins(): string[] {
+  const raw = process.env.CORS_ORIGIN || "http://localhost:8080,http://127.0.0.1:8080";
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 const app = new Hono();
 
 app.use(logger());
 app.use(
   cors({
-    origin: "*",
+    origin: (origin) => {
+      const allowed = allowedCorsOrigins();
+      if (!origin) return allowed[0];
+      return allowed.includes(origin) ? origin : null;
+    },
     credentials: true,
   })
 );
