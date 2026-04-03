@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { serve } from "@hono/node-server";
 import { connectDB } from "./lib/mongo";
+import { authRouter } from "./routes/auth";
 import { testRouter } from "./routes/test";
 
 const app = new Hono();
@@ -16,6 +17,7 @@ app.use(
   })
 );
 
+app.route("/auth", authRouter);
 app.route("/test", testRouter);
 
 app.get("/health", (c) => {

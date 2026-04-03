@@ -1,6 +1,6 @@
 # GitLore Backend
 
-Hono + MongoDB API. This tree is merged incrementally: this commit provides `/health`, `/test/*`, and database bootstrap. OAuth, repository, and AI routes land in follow-up PRs.
+Hono + MongoDB API, merged in small PRs. This commit adds GitHub OAuth (`/auth/*`) on top of `/health` and `/test/*`.
 
 ## Run (this PR)
 
@@ -8,10 +8,8 @@ Hono + MongoDB API. This tree is merged incrementally: this commit provides `/he
 cd Backend
 npm install
 cp .env.example .env
-# Set MONGODB_URI at minimum
-npm run dev
 ```
 
-Use `GET /health` and `GET /test/ping` to verify the process.
+Set at least `MONGODB_URI`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_CALLBACK_URL`, and `SESSION_SECRET` to exercise OAuth. See `.env.example`.
 
-See `.env.example` for variables required by later PRs.
+Repository and AI routes ship in later PRs.
