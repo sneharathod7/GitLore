@@ -7,7 +7,8 @@ export interface GitHubClient {
 export function createGithubClient(token: string): typeof graphql {
   return graphql.defaults({
     headers: {
-      authorization: `token ${token}`,
+      // Match REST (githubRest.ts): GitHub OAuth user tokens expect Bearer.
+      authorization: `Bearer ${token}`,
     },
   });
 }

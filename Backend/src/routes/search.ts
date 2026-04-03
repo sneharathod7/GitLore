@@ -33,32 +33,37 @@ searchRouter.post("/search", async (c) => {
     // Get embedding for query
     const queryEmbedding = await getEmbedding(request.query);
 
-    // Perform vector search in MongoDB
     const db = getDB();
 
-    // For MVP, we'll do a simple similarity search
-    // In production, this would use $vectorSearch aggregation
+    const repoNorm = request.repo.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
+    const repoPattern = new RegExp(
+      `^${repoNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      "i"
+    );
+
     const allResults = await db
       .collection("commit_cache")
-      .find({ repo: request.repo })
+      .find({ repo: repoPattern })
+      .limit(400)
       .toArray();
 
-    // Calculate similarity scores (cosine similarity)
     const scoredResults = allResults
       .map((doc: any) => {
-        const similarity = cosineSimilarity(
-          queryEmbedding,
-          doc.embedding || []
-        );
+        const emb = doc.embedding as number[] | undefined;
+        const similarity =
+          Array.isArray(emb) && emb.length > 0 && emb.length === queryEmbedding.length
+            ? cosineSimilarity(queryEmbedding, emb)
+            : 0;
         return {
           sha: doc.sha,
-          file_path: doc.file_path,
-          line_number: doc.line_number,
-          one_liner: doc.narrative?.one_liner || doc.message,
+          file_path: doc.file_path as string,
+          line_number: doc.line_number as number,
+          one_liner: (doc.narrative?.one_liner as string) || (doc.message as string) || "",
           score: similarity,
-          source: `${request.repo}:${doc.file_path}#L${doc.line_number}`,
+          source: `${repoNorm}:${doc.file_path}#L${doc.line_number}`,
         };
       })
+      .filter((r) => r.one_liner)
       .sort((a, b) => b.score - a.score)
       .slice(0, request.limit);
 
