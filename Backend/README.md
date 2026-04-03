@@ -14,4 +14,8 @@ npm run dev
 
 Use `GET /health` and `GET /test/ping` to verify the process.
 
+CORS uses an explicit allowlist (not `*`) so cookies work once OAuth lands. Override with `CORS_ORIGIN` (comma-separated) if the frontend runs on another host or port.
+
+`/test/env-check` is disabled when `NODE_ENV=production`.
+
 See `.env.example` for variables required by later PRs.

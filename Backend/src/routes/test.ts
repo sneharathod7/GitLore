@@ -129,9 +129,12 @@ testRouter.get("/dummy-guardrails", (c) => {
 
 /**
  * GET /test/env-check
- * Check if environment variables are loaded
+ * Development only — avoids disclosing which secrets exist in production.
  */
 testRouter.get("/env-check", (c) => {
+  if (process.env.NODE_ENV === "production") {
+    return c.json({ error: "Not found" }, 404);
+  }
   return c.json({
     env_loaded: {
       MONGODB_URI: process.env.MONGODB_URI ? "✅ Set" : "❌ Not set",
