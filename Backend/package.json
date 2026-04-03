@@ -4,6 +4,9 @@
   "description": "GitLore Backend - Code Context API",
   "main": "dist/server.js",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "tsx --watch src/server.ts",
     "build": "tsc",

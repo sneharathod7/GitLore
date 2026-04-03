@@ -45,6 +45,7 @@ async function createIndexes(database: Db) {
     console.log("Database indexes created");
   } catch (error) {
     console.error("Error creating indexes:", error);
+    throw error;
   }
 }
 
