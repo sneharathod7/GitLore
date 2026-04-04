@@ -17,6 +17,7 @@ const copies = [
   ["node_modules/prismjs/components/prism-css.min.js", "vendor/prism-css.min.js"],
   ["node_modules/prismjs/themes/prism-tomorrow.min.css", "vendor/prism-tomorrow.min.css"],
   ["node_modules/marked/lib/marked.esm.js", "vendor/marked.esm.js"],
+  ["node_modules/dompurify/dist/purify.es.mjs", "vendor/purify.es.mjs"],
 ];
 
 for (const [from, to] of copies) {

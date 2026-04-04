@@ -56,7 +56,8 @@ export function verifySession(signed: string): string {
  * Authentication middleware for protected routes
  */
 /**
- * Session token from cookie (web) or Authorization Bearer / X-GitLore-Session (Chrome extension).
+ * Session token from cookie (web) or Authorization Bearer / X-GitLore-Session (e.g. extension).
+ * authMiddleware uses this so API routes accept the same session as the web cookie.
  */
 export function getSessionToken(c: Context): string | undefined {
   const fromCookie = getCookie(c, "gitlore_session");

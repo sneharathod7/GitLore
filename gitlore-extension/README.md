@@ -7,7 +7,8 @@ Runs **entirely in the browser**. No GitLore backend or local Node server is req
 | **GitHub sign-in** | OAuth 2.0 **PKCE** against GitHub. **Client ID** required; **client secret** optional in Settings (local only) if GitHub’s token step requires it — never commit secrets to the repo. |
 | **Repositories** | GitHub REST API with the user token. |
 | **Knowledge graph** | Built from the **Git Trees** API (folders + files, up to 500 paths), visualized with D3. |
-| **Chat** | **Google Gemini** (`gemini-2.5-flash`) with repo file list + README excerpt as context. Add a **Gemini API key** in settings (from [Google AI Studio](https://aistudio.google.com/apikey)). |
+| **Chat** | **Google Gemini** (`gemini-2.5-flash`) with repo file list + README excerpt as context. Add a **Gemini API key** in settings (from [Google AI Studio](https://aistudio.google.com/apikey)). Assistant markdown is rendered with **DOMPurify** after parsing to reduce HTML injection risk. |
+| **Floating launcher** | After sign-in, a draggable **GitLore** button appears on **github.com** only (minimal host access). It opens the same panel UI in a floating iframe. |
 
 The web app’s backend (ingest, MongoDB, PR-based graph) is **not** used here; this extension is intentionally separate while following similar UX (connect → pick repo → graph → chat).
 
@@ -41,8 +42,9 @@ Optional. In **Settings**, paste a **Gemini API key** so “Ask about this repos
 ## Permissions
 
 - `https://api.github.com/*` — repos, git trees, README.
-- `https://github.com/*` — OAuth redirect pages inside `launchWebAuthFlow`.
+- `https://github.com/*` — OAuth inside `launchWebAuthFlow`, and the **floating launcher** content script (no blanket `https://*/*` host access).
 - `https://generativelanguage.googleapis.com/*` — Gemini streaming.
+- `tabs` — notify open tabs when sign-in state changes so the float button can appear without a full page reload.
 
 ## Vendored assets
 

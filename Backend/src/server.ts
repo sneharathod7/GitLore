@@ -28,6 +28,17 @@ function allowedCorsOrigins(): string[] {
     .filter(Boolean);
 }
 
+/** Exact chrome-extension:// origins allowed for credentialed CORS (comma-separated in env). */
+function allowedChromeExtensionOrigins(): Set<string> {
+  const raw = process.env.CHROME_EXTENSION_CORS_ORIGINS || "";
+  return new Set(
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+}
+
 const app = new Hono();
 
 app.use(logger());
@@ -37,8 +48,11 @@ app.use(
       const allowed = allowedCorsOrigins();
       if (!origin) return allowed[0];
       if (allowed.includes(origin)) return origin;
-      // Chrome extension pages / service worker preflight
-      if (origin.startsWith("chrome-extension://")) return origin;
+      if (origin.startsWith("chrome-extension://")) {
+        const ext = allowedChromeExtensionOrigins();
+        if (ext.size > 0 && ext.has(origin)) return origin;
+        return null;
+      }
       return null;
     },
     credentials: true,

@@ -1,6 +1,7 @@
 /**
  * Side panel: chat (markdown), knowledge graph in full overlay (D3 + Prism).
  */
+import DOMPurify from "../vendor/purify.es.mjs";
 import { marked } from "../vendor/marked.esm.js";
 import * as api from "../utils/api-client.js";
 import * as githubApi from "../utils/github-api.js";
@@ -98,7 +99,7 @@ function renderRichText(raw) {
     const html = marked.parse(String(raw), { async: false });
     const wrapper = document.createElement("div");
     wrapper.className = "md-root";
-    wrapper.innerHTML = html;
+    wrapper.innerHTML = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
     while (wrapper.firstChild) frag.appendChild(wrapper.firstChild);
   } catch {
     const p = document.createElement("p");

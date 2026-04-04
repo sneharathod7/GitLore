@@ -29,12 +29,46 @@ interface GitHubTokenResponse {
 }
 
 /**
- * Chrome extension OAuth redirect (https://&lt;extension-id&gt;.chromiumapp.org/)
+ * Normalize redirect URI for allowlist comparison (no hash; strip trailing slash).
+ */
+function normalizeOAuthRedirectUri(uri: string): string {
+  try {
+    const u = new URL(uri);
+    u.hash = "";
+    let s = u.toString();
+    if (s.endsWith("/")) s = s.slice(0, -1);
+    return s;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Exact extension OAuth callback URLs allowed for server-side code exchange (env allowlist).
+ * Without GITHUB_EXTENSION_REDIRECT_URIS, extension backend routes reject all redirect URIs.
+ */
+function getAllowedExtensionRedirectUris(): Set<string> {
+  const raw = process.env.GITHUB_EXTENSION_REDIRECT_URIS || "";
+  return new Set(
+    raw
+      .split(",")
+      .map((s) => normalizeOAuthRedirectUri(s.trim()))
+      .filter(Boolean)
+  );
+}
+
+/**
+ * Chrome extension OAuth redirect: must be https://*.chromiumapp.org and explicitly allowlisted.
  */
 function isExtensionChromeRedirectUri(uri: string): boolean {
   try {
     const u = new URL(uri);
-    return u.protocol === "https:" && u.hostname.endsWith(".chromiumapp.org");
+    if (u.protocol !== "https:" || !u.hostname.endsWith(".chromiumapp.org")) {
+      return false;
+    }
+    const allowed = getAllowedExtensionRedirectUris();
+    if (allowed.size === 0) return false;
+    return allowed.has(normalizeOAuthRedirectUri(uri));
   } catch {
     return false;
   }
@@ -162,7 +196,13 @@ authRouter.get("/github/extension/start", (c) => {
     return c.json({ error: "Missing redirect_uri or state" }, 400);
   }
   if (!isExtensionChromeRedirectUri(redirectUri)) {
-    return c.json({ error: "Invalid redirect_uri (must be https://*.chromiumapp.org/)" }, 400);
+    return c.json(
+      {
+        error:
+          "Invalid redirect_uri: must be an allowlisted https://<extension-id>.chromiumapp.org URL (set GITHUB_EXTENSION_REDIRECT_URIS on the server).",
+      },
+      400
+    );
   }
 
   const params = new URLSearchParams({
@@ -189,7 +229,13 @@ authRouter.post("/github/extension/token", async (c) => {
       return c.json({ error: "Missing code or redirect_uri" }, 400);
     }
     if (!isExtensionChromeRedirectUri(redirectUri)) {
-      return c.json({ error: "Invalid redirect_uri" }, 400);
+      return c.json(
+        {
+          error:
+            "Invalid redirect_uri: must match an entry in GITHUB_EXTENSION_REDIRECT_URIS (exact callback allowlist).",
+        },
+        400
+      );
     }
 
     const exchanged = await exchangeGithubOAuthCode(code, redirectUri);

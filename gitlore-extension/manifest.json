@@ -23,13 +23,11 @@
   "host_permissions": [
     "https://api.github.com/*",
     "https://github.com/*",
-    "https://generativelanguage.googleapis.com/*",
-    "http://*/*",
-    "https://*/*"
+    "https://generativelanguage.googleapis.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
+      "matches": ["https://github.com/*"],
       "js": ["content/float.js"],
       "run_at": "document_idle"
     }
@@ -40,7 +38,7 @@
   "web_accessible_resources": [
     {
       "resources": ["sidepanel/*", "vendor/*", "content/float.css"],
-      "matches": ["http://*/*", "https://*/*"]
+      "matches": ["https://github.com/*"]
     }
   ]
 }
