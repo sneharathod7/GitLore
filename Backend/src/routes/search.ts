@@ -30,8 +30,15 @@ searchRouter.post("/search", async (c) => {
     const body = await c.req.json();
     const request = searchRequestSchema.parse(body);
 
-    // Get embedding for query
-    const queryEmbedding = await getEmbedding(request.query);
+    const queryEmbedding = await getEmbedding(request.query, "query");
+    if (!queryEmbedding) {
+      return c.json({
+        query: request.query,
+        results: [] as Array<Record<string, unknown>>,
+        total: 0,
+        note: "Embeddings unavailable. Set GEMINI_API_KEY and GEMINI_EMBEDDING_MODELS on the server.",
+      });
+    }
 
     const db = getDB();
 

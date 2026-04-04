@@ -191,10 +191,8 @@ analyzeRouter.post("/analyze", async (c) => {
 
     narrative.timeline = timeline;
 
-    // Generate embedding for vector search
-    const embedding = await getEmbedding(narrative.one_liner);
+    const embedding = await getEmbedding(narrative.one_liner, "document");
 
-    // Cache the result
     await db.collection("commit_cache").updateOne(
       { _id: cacheKey } as any,
       {
@@ -205,7 +203,7 @@ analyzeRouter.post("/analyze", async (c) => {
           sha: commit.oid,
           message: commit.message,
           narrative,
-          embedding,
+          embedding: embedding ?? null,
           created_at: new Date(),
           ttl: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
         },
