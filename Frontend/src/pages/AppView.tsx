@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, lazy, Suspense } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { python } from "@codemirror/lang-python";
 import { javascript } from "@codemirror/lang-javascript";
@@ -25,6 +25,7 @@ import {
 import { pathsToFileTree, type FileNode } from "@/lib/pathsToFileTree";
 import { parseUnifiedDiff, diffLinesToHunkString, type ParsedDiffLine } from "@/lib/parseUnifiedDiff";
 import { startGithubOAuth } from "@/lib/githubOAuth";
+const StoryVoiceGate = lazy(() => import("@/components/StoryVoiceGate"));
 
 const FALLBACK_CODE = `// Select a file in the tree or set owner/repo/branch in the bar above.
 // File list is loaded from GitHub (GET /api/repo/.../index).`;
@@ -410,7 +411,15 @@ const SIGNAL_ICONS: Record<string, string> = {
   pattern_match: "⚡",
 };
 
-const NarrativePanel = ({ narrative, line }: { narrative: InsightNarrative | null; line: number | null }) => {
+const NarrativePanel = ({
+  narrative,
+  line,
+  onListenClick,
+}: {
+  narrative: InsightNarrative | null;
+  line: number | null;
+  onListenClick?: () => void;
+}) => {
   if (!narrative) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
@@ -678,6 +687,7 @@ const NarrativePanel = ({ narrative, line }: { narrative: InsightNarrative | nul
         {/* ── Listen button ── */}
         <button
           type="button"
+          onClick={() => onListenClick?.()}
           className="group inline-flex items-center gap-2 rounded px-4 py-2 text-sm font-medium transition-all"
           style={{
             background: "linear-gradient(135deg, rgba(201,168,76,0.1), rgba(201,168,76,0.05))",
@@ -804,8 +814,22 @@ const AppView = () => {
   const [leftTab, setLeftTab] = useState<LeftTab>("code");
   const [selectedLine, setSelectedLine] = useState<number | null>(null);
   const [mobileTreeOpen, setMobileTreeOpen] = useState(false);
+  const [storyVoiceOpen, setStoryVoiceOpen] = useState(false);
+  /** Frozen narrative context for voice UI so WebRTC is not torn down when panel goes `idle` during re-analyze. */
+  const [storyVoiceSnapshot, setStoryVoiceSnapshot] = useState<{
+    narrative: InsightNarrative;
+    line: number;
+    filePath: string;
+  } | null>(null);
   /** Open narrative from navbar Decisions search after file content loads. */
   const [pendingDecisionOpen, setPendingDecisionOpen] = useState<{ file: string; line: number } | null>(null);
+
+  useEffect(() => {
+    const t = panel.type;
+    if (t === "narrative" || t === "idle") return;
+    setStoryVoiceOpen(false);
+    setStoryVoiceSnapshot(null);
+  }, [panel.type]);
 
   useEffect(() => {
     setExplanationCommentId(null);
@@ -1148,7 +1172,18 @@ const AppView = () => {
     ) : panel.type === "explanation" ? (
       <ExplanationPanel explanation={panel.data} />
     ) : panel.type === "narrative" ? (
-      <NarrativePanel narrative={panel.data} line={panel.line} />
+      <NarrativePanel
+        narrative={panel.data}
+        line={panel.line}
+        onListenClick={() => {
+          setStoryVoiceSnapshot({
+            narrative: panel.data,
+            line: panel.line,
+            filePath: target.filePath || "",
+          });
+          setStoryVoiceOpen(true);
+        }}
+      />
     ) : (
       <div className="flex h-full items-center justify-center p-8">
         <p className="text-center font-body text-sm leading-relaxed text-gitlore-text-secondary">
@@ -1611,6 +1646,22 @@ const AppView = () => {
       )}
       </div>
       ) : null}
+
+      {storyVoiceOpen && storyVoiceSnapshot && (
+        <Suspense fallback={null}>
+          <StoryVoiceGate
+            open={storyVoiceOpen}
+            onClose={() => {
+              setStoryVoiceOpen(false);
+              setStoryVoiceSnapshot(null);
+            }}
+            narrative={storyVoiceSnapshot.narrative}
+            line={storyVoiceSnapshot.line}
+            repoFull={repoFull}
+            filePath={storyVoiceSnapshot.filePath}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

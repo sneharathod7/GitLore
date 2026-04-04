@@ -474,6 +474,118 @@ export async function aggregatePatternCounts(
     .slice(0, 12);
 }
 
+/** Repo-scoped pattern / theme insights for the Patterns UI (Mongo only, not cached with repo overview). */
+export type RepoPatternInsights = {
+  explain: {
+    labels: Array<{ text: string; count: number }>;
+    rowCount: number;
+  };
+  knowledgeGraph: {
+    prNodeCount: number;
+    byType: Array<{ text: string; count: number }>;
+    topTopics: Array<{ text: string; count: number }>;
+  };
+  lineAnalyze: {
+    cachedCount: number;
+    byConfidence: { high: number; medium: number; low: number };
+    topFiles: Array<{ path: string; count: number }>;
+  };
+};
+
+export async function aggregateRepoPatternInsights(
+  db: import("mongodb").Db,
+  owner: string,
+  repoName: string
+): Promise<RepoPatternInsights> {
+  const repoRe = new RegExp(`^${escapeRegex(owner)}/${escapeRegex(repoName)}$`, "i");
+
+  const explainDocs = await db
+    .collection("explanations_cache")
+    .find({ repo: repoRe })
+    .limit(500)
+    .toArray();
+  const explainMap = new Map<string, number>();
+  for (const doc of explainDocs) {
+    const exp = (doc as any).explanation;
+    const name =
+      (typeof exp?.pattern_name === "string" && exp.pattern_name.trim()) ||
+      (typeof (doc as any).pattern_matched === "string" && String((doc as any).pattern_matched).trim());
+    if (name) {
+      const key = String(name).trim();
+      explainMap.set(key, (explainMap.get(key) || 0) + 1);
+    }
+  }
+  const labels = [...explainMap.entries()]
+    .map(([text, count]) => ({ text, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 20);
+
+  const prNodeCount = await db.collection("knowledge_nodes").countDocuments({ repo: repoRe });
+
+  const byTypeRaw = await db
+    .collection("knowledge_nodes")
+    .aggregate([
+      { $match: { repo: repoRe } },
+      { $group: { _id: "$type", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+    ])
+    .toArray();
+  const byType = byTypeRaw
+    .filter((x) => x._id != null && String(x._id).trim() !== "")
+    .map((x) => ({ text: String(x._id), count: x.count as number }));
+
+  const topicsRaw = await db
+    .collection("knowledge_nodes")
+    .aggregate([
+      { $match: { repo: repoRe, topics: { $exists: true, $type: "array", $ne: [] } } },
+      { $unwind: "$topics" },
+      { $match: { topics: { $type: "string", $ne: "" } } },
+      { $group: { _id: { $toLower: "$topics" }, count: { $sum: 1 } } },
+      { $match: { _id: { $ne: "" } } },
+      { $sort: { count: -1 } },
+      { $limit: 28 },
+    ])
+    .toArray();
+  const topTopics = topicsRaw.map((x) => ({
+    text: String(x._id),
+    count: x.count as number,
+  }));
+
+  const commitDocs = await db
+    .collection("commit_cache")
+    .find({ repo: repoRe })
+    .limit(800)
+    .toArray();
+  const fileMap = new Map<string, number>();
+  let high = 0;
+  let medium = 0;
+  let low = 0;
+  for (const doc of commitDocs) {
+    const fp = (doc as any).file_path;
+    if (typeof fp === "string" && fp.trim()) {
+      fileMap.set(fp, (fileMap.get(fp) || 0) + 1);
+    }
+    const c = String((doc as any).narrative?.confidence ?? "").toLowerCase();
+    if (c === "high") high++;
+    else if (c === "medium") medium++;
+    else low++;
+  }
+  const topFiles = [...fileMap.entries()]
+    .map(([path, count]) => ({ path, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 12);
+
+  return {
+    explain: { labels, rowCount: explainDocs.length },
+    knowledgeGraph: { prNodeCount, byType, topTopics },
+    lineAnalyze: {
+      cachedCount: commitDocs.length,
+      byConfidence: { high, medium, low },
+      topFiles,
+    },
+  };
+}
+
 /** GitHub `GET /user/repos` and search `items[]` shape (subset). */
 type GithubRepoListItemRaw = {
   id: number;

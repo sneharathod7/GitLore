@@ -1,0 +1,14 @@
+diff --git a/node_modules/@elevenlabs/client/dist/utils/WebRTCConnection.js b/node_modules/@elevenlabs/client/dist/utils/WebRTCConnection.js
+index 860d226..344b3c1 100644
+--- a/node_modules/@elevenlabs/client/dist/utils/WebRTCConnection.js
++++ b/node_modules/@elevenlabs/client/dist/utils/WebRTCConnection.js
+@@ -165,7 +165,8 @@ export class WebRTCConnection extends BaseConnection {
+         else {
+             throw new Error("Either conversationToken or agentId is required for WebRTC connection");
+         }
+-        const room = new Room();
++        // ElevenLabs LiveKit returns 404 on /rtc/v1; use v0 signal path immediately (see livekit-client Room.connectSignal → useV0Path).
++        const room = new Room({ singlePeerConnection: false });
+         try {
+             // Create connection instance first to set up event listeners
+             const conversationId = `room_${Date.now()}`;

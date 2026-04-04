@@ -25,8 +25,21 @@ export default defineConfig(({ mode }) => {
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Force one React instance (avoids "Invalid hook call" / null dispatcher with prebundled deps).
+      react: path.resolve(__dirname, "./node_modules/react"),
+      "react-dom": path.resolve(__dirname, "./node_modules/react-dom"),
     },
     dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
+  },
+  // @elevenlabs/client is patched postinstall; stale node_modules/.vite can still serve old prebundles (rtc/v1 404).
+  optimizeDeps: {
+    include: [
+      "react",
+      "react-dom",
+      "react/jsx-runtime",
+      "@elevenlabs/react",
+      "@elevenlabs/client",
+    ],
   },
 };
 });

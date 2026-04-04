@@ -98,6 +98,7 @@ explainRouter.post("/explain", async (c) => {
         $set: {
           repo: repoNorm,
           explanation,
+          pattern_matched: patternMatch?.pattern ?? null,
           created_at: new Date(),
           ttl: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
         },
