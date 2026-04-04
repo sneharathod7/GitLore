@@ -399,6 +399,32 @@ export async function fetchRepoPatternInsights(
   );
 }
 
+export type RepoAnalyticsPayload = {
+  analytics: {
+    confidenceBreakdown: Array<{ _id: string | null; count: number }>;
+    dataSignals: Array<{ _id: string; count: number }>;
+    fileHeatmap: Array<{
+      _id: string | null;
+      analysisCount: number;
+      avgConfidence: number | null;
+    }>;
+    timeline: Array<{ _id: string; count: number }>;
+    totals: Array<{
+      totalAnalyses: number;
+      uniqueFiles: number;
+      uniqueAuthors: number;
+    }>;
+  };
+  patterns: Array<{ _id: string | null; count: number; avgConfidence: number | null }>;
+};
+
+export async function fetchRepoAnalytics(owner: string, name: string): Promise<RepoAnalyticsPayload> {
+  const repo = `${owner}/${name}`;
+  return getJSON<RepoAnalyticsPayload>(
+    `/api/repo/analytics?repo=${encodeURIComponent(repo)}`
+  );
+}
+
 export type GithubUserProfile = {
   login: string;
   name: string | null;

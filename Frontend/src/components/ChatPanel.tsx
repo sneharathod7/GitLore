@@ -1,8 +1,13 @@
 import { useState, useRef, useEffect, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
-import { Send, Bot, User, ExternalLink, Loader, Sparkles } from "lucide-react";
+import { Send, Bot, User, ExternalLink, Loader, Sparkles, Trash2 } from "lucide-react";
 import { useRepo } from "@/context/RepoContext";
 import { postJSON, fetchChatGraphStatus, type ChatGraphStatusResponse } from "@/lib/gitloreApi";
+import {
+  loadChatSessionCache,
+  saveChatSessionCache,
+  clearChatSessionCache,
+} from "@/lib/overviewSessionCache";
 
 interface Source {
   pr_number: number;
@@ -93,31 +98,56 @@ const assistantMarkdownComponents = {
   hr: () => <hr className="my-3 border-gitlore-border" />,
 };
 
+function repoCacheKey(owner: string, name: string): string {
+  return `${owner.trim().toLowerCase()}/${name.trim().toLowerCase()}`;
+}
+
 export function ChatPanel() {
   const { target, repoReady } = useRepo();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [chatStatus, setChatStatus] = useState<ChatGraphStatusResponse | null>(null);
+  const [hydratedRepoKey, setHydratedRepoKey] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!repoReady) {
       setChatStatus(null);
+      setMessages([]);
+      setHydratedRepoKey(null);
       return;
     }
+    const { owner, name } = target;
+    const { messages: stored, chatStatus: storedStatus } = loadChatSessionCache(owner, name);
+    setMessages(stored as Message[]);
+    setChatStatus(storedStatus);
+    setHydratedRepoKey(repoCacheKey(owner, name));
+  }, [repoReady, target.owner, target.name]);
+
+  useEffect(() => {
+    if (!repoReady) return;
     let cancelled = false;
     void fetchChatGraphStatus(target.owner, target.name)
       .then((s) => {
         if (!cancelled) setChatStatus(s);
       })
       .catch(() => {
-        if (!cancelled) setChatStatus(null);
+        if (!cancelled) {
+          /* keep cached status if any */
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [repoReady, target.owner, target.name]);
+
+  useEffect(() => {
+    if (!repoReady || !hydratedRepoKey) return;
+    const key = repoCacheKey(target.owner, target.name);
+    if (hydratedRepoKey !== key) return;
+    saveChatSessionCache(target.owner, target.name, { messages, chatStatus });
+  }, [repoReady, hydratedRepoKey, target.owner, target.name, messages, chatStatus]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -192,19 +222,35 @@ export function ChatPanel() {
       <div className="shrink-0 border-b border-gitlore-border px-4 py-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <h3 className="text-sm font-medium text-gitlore-text">Chat with the knowledge graph</h3>
-          {chatStatus ? (
-            <span
-              className={`inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 font-code text-[10px] ${
-                chatStatus.geminiConfigured
-                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                  : "border-amber-500/40 bg-amber-500/10 text-amber-200"
-              }`}
-              title="Configured on the GitLore Backend (.env), not in the browser"
-            >
-              <Sparkles className="h-3 w-3 shrink-0" aria-hidden />
-              {chatStatus.geminiConfigured ? `Gemini: ${chatStatus.model}` : "Add GEMINI_API_KEY to Backend .env"}
-            </span>
-          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            {messages.length > 0 && repoReady ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setMessages([]);
+                  clearChatSessionCache(target.owner, target.name);
+                }}
+                className="inline-flex items-center gap-1 rounded-sm border border-gitlore-border px-2 py-0.5 font-code text-[10px] text-gitlore-text-secondary transition-colors hover:border-gitlore-error/50 hover:text-gitlore-error"
+                title="Clear this repo’s saved chat (local only)"
+              >
+                <Trash2 className="h-3 w-3 shrink-0" aria-hidden />
+                Clear chat
+              </button>
+            ) : null}
+            {chatStatus ? (
+              <span
+                className={`inline-flex items-center gap-1 rounded-sm border px-2 py-0.5 font-code text-[10px] ${
+                  chatStatus.geminiConfigured
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                    : "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                }`}
+                title="Configured on the GitLore Backend (.env), not in the browser"
+              >
+                <Sparkles className="h-3 w-3 shrink-0" aria-hidden />
+                {chatStatus.geminiConfigured ? `Gemini: ${chatStatus.model}` : "Add GEMINI_API_KEY to Backend .env"}
+              </span>
+            ) : null}
+          </div>
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-gitlore-text-secondary">
           Retrieval from indexed PR decisions, then <span className="text-gitlore-text/90">Gemini</span> on the server when{" "}

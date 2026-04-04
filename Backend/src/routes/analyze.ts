@@ -204,6 +204,10 @@ analyzeRouter.post("/analyze", async (c) => {
             line_number: request.line_number,
             sha: commit.oid,
             message: commit.message,
+            author:
+              commit.author?.user?.login ||
+              commit.author?.name ||
+              null,
             narrative,
             embedding: embedding ?? null,
             created_at: new Date(),

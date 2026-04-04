@@ -97,6 +97,9 @@ explainRouter.post("/explain", async (c) => {
       {
         $set: {
           repo: repoNorm,
+          file_path: request.file_path,
+          line: request.line,
+          pr_number: request.pr_number,
           explanation,
           pattern_matched: patternMatch?.pattern ?? null,
           created_at: new Date(),

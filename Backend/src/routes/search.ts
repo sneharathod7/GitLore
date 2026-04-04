@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getDB } from "../lib/mongo";
 import { getCurrentUser } from "../middleware/auth";
 import { getEmbedding } from "../lib/gemini";
+import { hybridDecisionSearch, normalizeRepoKey } from "../lib/mongoAdvanced";
 
 export const searchRouter = new Hono();
 
@@ -42,15 +43,53 @@ searchRouter.post("/search", async (c) => {
 
     const db = getDB();
 
-    const repoNorm = request.repo.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
-    const repoPattern = new RegExp(
-      `^${repoNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-      "i"
-    );
+    const repoNorm = normalizeRepoKey(request.repo);
+
+    try {
+      const hybridRows = await hybridDecisionSearch(
+        queryEmbedding,
+        request.query,
+        repoNorm,
+        request.limit
+      );
+      if (hybridRows.length > 0) {
+        const results = hybridRows.map((doc: Record<string, unknown>) => {
+          const sha = typeof doc.sha === "string" ? doc.sha : "";
+          const file_path = typeof doc.file_path === "string" ? doc.file_path : "";
+          const line_number =
+            typeof doc.line_number === "number" ? doc.line_number : 0;
+          const narrative = doc.narrative as Record<string, unknown> | undefined;
+          const one_liner =
+            (typeof narrative?.one_liner === "string" && narrative.one_liner) ||
+            (typeof doc.message === "string" && doc.message) ||
+            "";
+          const score = typeof doc.score === "number" ? doc.score : 0;
+          return {
+            sha,
+            file_path,
+            line_number,
+            one_liner,
+            score,
+            source: `${repoNorm}:${file_path}#L${line_number}`,
+          };
+        });
+        return c.json({
+          query: request.query,
+          results,
+          total: results.length,
+          mode: "hybrid" as const,
+        });
+      }
+    } catch (err) {
+      console.warn(
+        "[search] Hybrid Atlas search unavailable, using local cosine fallback:",
+        err instanceof Error ? err.message : err
+      );
+    }
 
     const allResults = await db
       .collection("commit_cache")
-      .find({ repo: repoPattern })
+      .find({ repo: repoNorm })
       .limit(400)
       .toArray();
 
@@ -78,6 +117,7 @@ searchRouter.post("/search", async (c) => {
       query: request.query,
       results: scoredResults,
       total: scoredResults.length,
+      mode: "local" as const,
     });
   } catch (error) {
     console.error("Search error:", error);

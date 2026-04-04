@@ -8,6 +8,10 @@ import {
   getRepositoryStats,
 } from "../lib/github";
 import {
+  getRepoAnalytics,
+  getPatternDistribution,
+} from "../lib/mongoAdvanced";
+import {
   enrichRepositoryOverview,
   aggregatePatternCounts,
   aggregateRepoPatternInsights,
@@ -27,6 +31,41 @@ import {
 } from "../lib/githubRest";
 
 export const repoRouter = new Hono();
+
+/**
+ * GET /api/repo/analytics?repo=owner/name
+ * Mongo aggregation: line-analyze cache stats + explanation pattern distribution.
+ */
+repoRouter.get("/repo/analytics", async (c) => {
+  try {
+    const user = getCurrentUser(c);
+    if (!user) return c.json({ error: "Not authenticated" }, 401);
+
+    const repo = c.req.query("repo")?.trim();
+    if (!repo) {
+      return c.json({ error: "repo query param required" }, 400);
+    }
+
+    const [analytics, patterns] = await Promise.all([
+      getRepoAnalytics(repo),
+      getPatternDistribution(repo),
+    ]);
+
+    return c.json({ analytics, patterns });
+  } catch (error) {
+    console.error("repo/analytics error:", error);
+    return c.json(
+      {
+        error: "Failed to load repo analytics",
+        message:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
+      },
+      500
+    );
+  }
+});
 
 /**
  * GET /api/user/github-profile — followers, repos, etc. for the signed-in user.
