@@ -88,6 +88,15 @@ async function createIndexes(database: Db) {
       .collection("knowledge_progress")
       .createIndex({ repo: 1 }, { unique: true });
 
+    await database
+      .collection("enforcement_logs")
+      .createIndex({ repo: 1, timestamp: -1 })
+      .catch(() => {});
+    await database
+      .collection("enforcement_logs")
+      .createIndex({ user: 1, timestamp: -1 })
+      .catch(() => {});
+
     console.log("Database indexes created");
   } catch (error) {
     console.error("Error creating indexes:", error);
