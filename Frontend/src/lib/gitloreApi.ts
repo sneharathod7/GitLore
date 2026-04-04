@@ -341,7 +341,9 @@ async function getJSON<T>(path: string): Promise<T> {
   const res = await apiFetch(path);
   const data = (await res.json()) as Record<string, unknown>;
   if (!res.ok) {
-    throw new Error((data.error as string) || (data.message as string) || res.statusText);
+    const err = (data.error as string) || (data.message as string) || res.statusText;
+    const hint = typeof data.hint === "string" ? data.hint : "";
+    throw new Error(hint ? `${err} — ${hint}` : err);
   }
   return data as T;
 }
@@ -355,6 +357,32 @@ export async function fetchRepoOverview(
 ): Promise<RepoOverviewResponse> {
   const q = branch ? `?branch=${encodeURIComponent(branch)}` : "";
   return getJSON<RepoOverviewResponse>(`/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${q}`);
+}
+
+export type RepoPatternInsightsResponse = {
+  explain: {
+    labels: Array<{ text: string; count: number }>;
+    rowCount: number;
+  };
+  knowledgeGraph: {
+    prNodeCount: number;
+    byType: Array<{ text: string; count: number }>;
+    topTopics: Array<{ text: string; count: number }>;
+  };
+  lineAnalyze: {
+    cachedCount: number;
+    byConfidence: { high: number; medium: number; low: number };
+    topFiles: Array<{ path: string; count: number }>;
+  };
+};
+
+export async function fetchRepoPatternInsights(
+  owner: string,
+  name: string
+): Promise<RepoPatternInsightsResponse> {
+  return getJSON<RepoPatternInsightsResponse>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pattern-insights`
+  );
 }
 
 export type GithubUserProfile = {
@@ -528,4 +556,92 @@ export async function testGuardrailAction(action: string): Promise<{
   category?: string;
 }> {
   return postJSON("/api/guardrails/test", { action });
+}
+
+/** ElevenLabs voice — configured on backend; never exposes API key. */
+export interface VoiceStatusResponse {
+  ttsReady: boolean;
+  ttsHindiReady?: boolean;
+  agentReady: boolean;
+  /** ElevenLabs agent + Gemini for client-tool voice Q&A */
+  voiceChatGeminiReady?: boolean;
+  /** ConvAI / LiveKit region — must match your ElevenLabs workspace */
+  elevenlabsServerLocation?: string;
+  ttsModel: string;
+  envPresent?: {
+    apiKey: boolean;
+    voiceId: boolean;
+    voiceIdHi?: boolean;
+    geminiForHindi?: boolean;
+    geminiApi?: boolean;
+    agentId: boolean;
+  };
+}
+
+export type AgentSessionResponse = {
+  mode: "webrtc" | "public";
+  agentId?: string;
+  conversationToken?: string;
+  /** Align WebRTC LiveKit host with token API region */
+  serverLocation?: "us" | "global" | "eu-residency" | "in-residency";
+  note?: string;
+};
+
+export async function fetchVoiceStatus(): Promise<VoiceStatusResponse> {
+  return getJSON<VoiceStatusResponse>("/api/voice/status");
+}
+
+export async function fetchAgentSession(): Promise<AgentSessionResponse> {
+  return getJSON<AgentSessionResponse>("/api/voice/agent/session");
+}
+
+export async function postGeminiVoiceReply(body: {
+  user_question: string;
+  context_text: string;
+}): Promise<{ answer: string }> {
+  return postJSON<{ answer: string }>("/api/voice/gemini-voice-reply", body);
+}
+
+export type VoiceTtsResult = { blob: Blob; displayText: string };
+
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mimeType });
+}
+
+export async function postVoiceTts(text: string, opts?: { locale?: "en" | "hi" }): Promise<VoiceTtsResult> {
+  const res = await apiFetch("/api/voice/tts", {
+    method: "POST",
+    body: JSON.stringify({ text, locale: opts?.locale ?? "en" }),
+  });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try {
+      const j = (await res.json()) as { error?: string; message?: string; hint?: string };
+      const parts = [j.error || j.message, j.hint].filter(Boolean);
+      msg = parts.length ? parts.join(" — ") : msg;
+    } catch {
+      try {
+        const t = await res.text();
+        if (t) msg = t.slice(0, 200);
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new Error(msg || "TTS failed");
+  }
+  const data = (await res.json()) as {
+    displayText?: string;
+    audioBase64?: string;
+    mimeType?: string;
+  };
+  if (!data.audioBase64 || typeof data.displayText !== "string") {
+    throw new Error("Invalid TTS response from server");
+  }
+  return {
+    blob: base64ToBlob(data.audioBase64, data.mimeType || "audio/mpeg"),
+    displayText: data.displayText,
+  };
 }
