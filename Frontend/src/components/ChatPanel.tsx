@@ -1,8 +1,32 @@
-import { useState, useRef, useEffect, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+  Children,
+  isValidElement,
+  type ComponentPropsWithoutRef,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
-import { Send, Bot, User, ExternalLink, Loader, Sparkles, Trash2 } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { Send, Bot, User, ExternalLink, Loader, Sparkles, Trash2, Mic } from "lucide-react";
 import { useRepo } from "@/context/RepoContext";
-import { postJSON, fetchChatGraphStatus, type ChatGraphStatusResponse } from "@/lib/gitloreApi";
+import { useToast } from "@/context/ToastContext";
+import { useTheme } from "@/context/ThemeContext";
+import {
+  postJSON,
+  fetchChatGraphStatus,
+  fetchChatSuggestions,
+  type ChatGraphStatusResponse,
+} from "@/lib/gitloreApi";
+import { ChatMermaidBlock } from "@/components/ChatMermaidBlock";
+import {
+  browserSpeechRecognitionSupported,
+  recognizeSpeechOnce,
+} from "@/lib/browserSpeechRecognition";
 import {
   loadChatSessionCache,
   saveChatSessionCache,
@@ -40,76 +64,110 @@ const TYPE_COLORS: Record<string, string> = {
   other: "text-gray-500",
 };
 
-/** Markdown mapping for assistant replies — scoped to the chat bubble. */
-const assistantMarkdownComponents = {
-  h1: (props: ComponentPropsWithoutRef<"h1">) => (
-    <h1 className="mb-2 mt-3 text-base font-semibold text-gitlore-text first:mt-0" {...props} />
-  ),
-  h2: (props: ComponentPropsWithoutRef<"h2">) => (
-    <h2 className="mb-2 mt-3 text-[15px] font-semibold text-gitlore-text first:mt-0" {...props} />
-  ),
-  h3: (props: ComponentPropsWithoutRef<"h3">) => (
-    <h3 className="mb-1.5 mt-2 text-sm font-semibold text-gitlore-text first:mt-0" {...props} />
-  ),
-  p: (props: ComponentPropsWithoutRef<"p">) => <p className="mb-2 last:mb-0 leading-relaxed text-gitlore-text" {...props} />,
-  ul: (props: ComponentPropsWithoutRef<"ul">) => (
-    <ul className="mb-2 list-inside list-disc space-y-1 pl-0.5 text-gitlore-text marker:text-gitlore-text-secondary" {...props} />
-  ),
-  ol: (props: ComponentPropsWithoutRef<"ol">) => (
-    <ol className="mb-2 list-inside list-decimal space-y-1 pl-0.5 text-gitlore-text marker:text-gitlore-text-secondary" {...props} />
-  ),
-  li: (props: ComponentPropsWithoutRef<"li">) => <li className="leading-relaxed [&>p]:mb-0" {...props} />,
-  strong: (props: ComponentPropsWithoutRef<"strong">) => <strong className="font-semibold text-gitlore-text" {...props} />,
-  em: (props: ComponentPropsWithoutRef<"em">) => <em className="italic text-gitlore-text" {...props} />,
-  a: (props: ComponentPropsWithoutRef<"a">) => (
-    <a
-      className="text-gitlore-accent underline decoration-gitlore-accent/40 underline-offset-2 transition-colors hover:text-gitlore-accent-hover"
-      target="_blank"
-      rel="noopener noreferrer"
-      {...props}
-    />
-  ),
-  code: ({ className, children, ...props }: ComponentPropsWithoutRef<"code">) => {
-    const isBlock = /language-/.test(className || "");
-    if (isBlock) {
-      return (
-        <code className={className} {...props}>
-          {children}
-        </code>
-      );
-    }
-    return (
-      <code
-        className="rounded-sm bg-gitlore-code px-1.5 py-0.5 font-code text-[13px] text-gitlore-accent"
-        {...props}
-      >
-        {children}
-      </code>
-    );
-  },
-  pre: ({ children }: { children?: ReactNode }) => (
-    <pre className="mb-2 max-w-full overflow-x-auto rounded-sm border border-gitlore-border bg-gitlore-code p-3 font-code text-[13px] leading-relaxed text-gitlore-text">
-      {children}
-    </pre>
-  ),
-  blockquote: (props: ComponentPropsWithoutRef<"blockquote">) => (
-    <blockquote className="mb-2 border-l-2 border-gitlore-border pl-3 text-gitlore-text-secondary italic" {...props} />
-  ),
-  hr: () => <hr className="my-3 border-gitlore-border" />,
-};
-
 function repoCacheKey(owner: string, name: string): string {
   return `${owner.trim().toLowerCase()}/${name.trim().toLowerCase()}`;
 }
 
-export function ChatPanel() {
+/** BCP 47 tag for Web Speech API; falls back when `navigator.language` is missing. */
+function browserSpeechLang(): string {
+  if (typeof navigator !== "undefined") {
+    const l = navigator.language?.trim();
+    if (l) return l;
+  }
+  return "en-US";
+}
+
+export function ChatPanel({ onChatComplete }: { onChatComplete?: () => void } = {}) {
   const { target, repoReady } = useRepo();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const { theme } = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [chatStatus, setChatStatus] = useState<ChatGraphStatusResponse | null>(null);
   const [hydratedRepoKey, setHydratedRepoKey] = useState<string | null>(null);
+  const [starterChips, setStarterChips] = useState<string[]>([]);
+  const [micBusy, setMicBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const chipsScrollRef = useRef<HTMLDivElement>(null);
+  const speechOk = browserSpeechRecognitionSupported();
+
+  const assistantMarkdownComponents = useMemo(
+    () => ({
+      h1: (props: ComponentPropsWithoutRef<"h1">) => (
+        <h1 className="mb-2 mt-3 text-base font-semibold text-gitlore-text first:mt-0" {...props} />
+      ),
+      h2: (props: ComponentPropsWithoutRef<"h2">) => (
+        <h2 className="mb-2 mt-3 text-[15px] font-semibold text-gitlore-text first:mt-0" {...props} />
+      ),
+      h3: (props: ComponentPropsWithoutRef<"h3">) => (
+        <h3 className="mb-1.5 mt-2 text-sm font-semibold text-gitlore-text first:mt-0" {...props} />
+      ),
+      p: (props: ComponentPropsWithoutRef<"p">) => (
+        <p className="mb-2 last:mb-0 leading-relaxed text-gitlore-text" {...props} />
+      ),
+      ul: (props: ComponentPropsWithoutRef<"ul">) => (
+        <ul className="mb-2 list-inside list-disc space-y-1 pl-0.5 text-gitlore-text marker:text-gitlore-text-secondary" {...props} />
+      ),
+      ol: (props: ComponentPropsWithoutRef<"ol">) => (
+        <ol className="mb-2 list-inside list-decimal space-y-1 pl-0.5 text-gitlore-text marker:text-gitlore-text-secondary" {...props} />
+      ),
+      li: (props: ComponentPropsWithoutRef<"li">) => <li className="leading-relaxed [&>p]:mb-0" {...props} />,
+      strong: (props: ComponentPropsWithoutRef<"strong">) => (
+        <strong className="font-semibold text-gitlore-text" {...props} />
+      ),
+      em: (props: ComponentPropsWithoutRef<"em">) => <em className="italic text-gitlore-text" {...props} />,
+      a: (props: ComponentPropsWithoutRef<"a">) => (
+        <a
+          className="text-gitlore-accent underline decoration-gitlore-accent/40 underline-offset-2 transition-colors hover:text-gitlore-accent-hover"
+          target="_blank"
+          rel="noopener noreferrer"
+          {...props}
+        />
+      ),
+      code: ({ className, children, ...props }: ComponentPropsWithoutRef<"code">) => {
+        const isBlock = /language-/.test(className || "");
+        if (isBlock) {
+          return (
+            <code className={className} {...props}>
+              {children}
+            </code>
+          );
+        }
+        return (
+          <code
+            className="rounded-sm bg-gitlore-code px-1.5 py-0.5 font-code text-[13px] text-gitlore-accent"
+            {...props}
+          >
+            {children}
+          </code>
+        );
+      },
+      pre: ({ children }: { children?: ReactNode }) => {
+        try {
+          const child = Children.only(children) as ReactElement<{ className?: string; children?: ReactNode }>;
+          if (isValidElement(child) && /language-mermaid/.test(String(child.props.className || ""))) {
+            const text = String(child.props.children ?? "").replace(/\n$/, "");
+            return <ChatMermaidBlock chart={text} theme={theme} />;
+          }
+        } catch {
+          /* fall through */
+        }
+        return (
+          <pre className="mb-2 max-w-full overflow-x-auto rounded-sm border border-gitlore-border bg-gitlore-code p-3 font-code text-[13px] leading-relaxed text-gitlore-text">
+            {children}
+          </pre>
+        );
+      },
+      blockquote: (props: ComponentPropsWithoutRef<"blockquote">) => (
+        <blockquote className="mb-2 border-l-2 border-gitlore-border pl-3 text-gitlore-text-secondary italic" {...props} />
+      ),
+      hr: () => <hr className="my-3 border-gitlore-border" />,
+    }),
+    [theme]
+  );
 
   useEffect(() => {
     if (!repoReady) {
@@ -157,64 +215,117 @@ export function ChatPanel() {
     });
   }, [messages, loading]);
 
+  const sendChatQuestion = useCallback(
+    async (qRaw: string) => {
+      const q = qRaw.trim();
+      if (!q || loading || !repoReady) return;
+      if (q.length < 5) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Please ask a slightly longer question (at least 5 characters) so the graph search can match meaningfully.",
+          },
+        ]);
+        return;
+      }
+
+      const history = messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({ role: m.role, content: m.content }));
+
+      setMessages((prev) => [...prev, { role: "user", content: q }]);
+      setLoading(true);
+
+      try {
+        const res = (await postJSON(`/api/repo/${target.owner}/${target.name}/chat`, {
+          question: q,
+          history: history.slice(-24),
+        })) as {
+          answer: string;
+          sources?: Source[];
+          searchTier?: string;
+          nodesUsed?: number;
+          synthesis?: SynthesisKind;
+          model?: string;
+          geminiConfigured?: boolean;
+          armorAgent?: boolean;
+          enforcementLog?: Array<{ tool: string; action: string; reason: string }>;
+        };
+        if (typeof res.geminiConfigured === "boolean") {
+          setChatStatus((prev) => ({
+            geminiConfigured: res.geminiConfigured!,
+            model: res.model || prev?.model || "gemini-2.5-flash-lite",
+          }));
+        }
+        const armorNote =
+          res.armorAgent && Array.isArray(res.enforcementLog)
+            ? `\n\n---\n_ArmorClaw:_ ${res.enforcementLog.length} policy check(s) — ${res.enforcementLog.filter((e) => e.action === "deny").length} blocked. See **ArmorClaw enforcement** below._`
+            : "";
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: res.answer + armorNote,
+            sources: res.sources,
+            searchTier: res.searchTier,
+            nodesUsed: res.nodesUsed,
+            synthesis: res.synthesis,
+            model: res.model,
+          },
+        ]);
+        if (res.nodesUsed === 0) {
+          toast({
+            message: "No decisions found yet. Build the Knowledge Graph first.",
+            type: "info",
+          });
+        }
+        onChatComplete?.();
+      } catch (err) {
+        const msg =
+          err instanceof Error && /invalid question|5.*2000/i.test(err.message)
+            ? "Use between 5 and 2000 characters for your question."
+            : "Sorry, something went wrong. Try again.";
+        setMessages((prev) => [...prev, { role: "assistant", content: msg }]);
+        console.error("Chat error:", err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [loading, repoReady, target.owner, target.name, toast, onChatComplete, messages]
+  );
+
+  useEffect(() => {
+    const q = (location.state as { chatQuery?: string } | null)?.chatQuery?.trim();
+    if (!q || !repoReady) return;
+    navigate(location.pathname, { replace: true, state: {} });
+    setInput("");
+    void sendChatQuestion(q);
+  }, [location.key, location.pathname, navigate, repoReady, sendChatQuestion]);
+
+  useEffect(() => {
+    if (!repoReady) {
+      setStarterChips([]);
+      return;
+    }
+    let cancelled = false;
+    void fetchChatSuggestions(target.owner, target.name)
+      .then((list) => {
+        if (!cancelled) setStarterChips(list);
+      })
+      .catch(() => {
+        if (!cancelled) setStarterChips([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repoReady, target.owner, target.name]);
+
   const handleSend = async () => {
     const q = input.trim();
     if (!q || loading || !repoReady) return;
-    if (q.length < 5) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Please ask a slightly longer question (at least 5 characters) so the graph search can match meaningfully.",
-        },
-      ]);
-      return;
-    }
-
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: q }]);
-    setLoading(true);
-
-    try {
-      const res = (await postJSON(`/api/repo/${target.owner}/${target.name}/chat`, {
-        question: q,
-      })) as {
-        answer: string;
-        sources?: Source[];
-        searchTier?: string;
-        nodesUsed?: number;
-        synthesis?: SynthesisKind;
-        model?: string;
-        geminiConfigured?: boolean;
-      };
-      if (typeof res.geminiConfigured === "boolean") {
-        setChatStatus((prev) => ({
-          geminiConfigured: res.geminiConfigured!,
-          model: res.model || prev?.model || "gemini-2.5-flash-lite",
-        }));
-      }
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: res.answer,
-          sources: res.sources,
-          searchTier: res.searchTier,
-          nodesUsed: res.nodesUsed,
-          synthesis: res.synthesis,
-          model: res.model,
-        },
-      ]);
-    } catch (err) {
-      const msg =
-        err instanceof Error && /invalid question|5.*2000/i.test(err.message)
-          ? "Use between 5 and 2000 characters for your question."
-          : "Sorry, something went wrong. Try again.";
-      setMessages((prev) => [...prev, { role: "assistant", content: msg }]);
-      console.error("Chat error:", err);
-    } finally {
-      setLoading(false);
-    }
+    await sendChatQuestion(q);
   };
 
   return (
@@ -231,7 +342,7 @@ export function ChatPanel() {
                   clearChatSessionCache(target.owner, target.name);
                 }}
                 className="inline-flex items-center gap-1 rounded-sm border border-gitlore-border px-2 py-0.5 font-code text-[10px] text-gitlore-text-secondary transition-colors hover:border-gitlore-error/50 hover:text-gitlore-error"
-                title="Clear this repo’s saved chat (local only)"
+                title="Clear this repo's saved chat (local only)"
               >
                 <Trash2 className="h-3 w-3 shrink-0" aria-hidden />
                 Clear chat
@@ -253,9 +364,9 @@ export function ChatPanel() {
           </div>
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-gitlore-text-secondary">
-          Retrieval from indexed PR decisions, then <span className="text-gitlore-text/90">Gemini</span> on the server when{" "}
-          <span className="font-code">GEMINI_API_KEY</span> is set in <span className="font-code">GitLore/Backend/.env</span>.
-          Never put API keys in the frontend.
+          Retrieval from indexed PR decisions, then <span className="text-gitlore-text/90">Gemini</span> plans and answers on the server when{" "}
+          <span className="font-code">GEMINI_API_KEY</span> is set. Each chat run can use <span className="text-gitlore-text/90">ArmorClaw</span>{" "}
+          (intent plan + per-tool policy). Set <span className="font-code">GITLORE_ARMOR_AGENT_CHAT=0</span> on the backend to use the legacy path only.
         </p>
       </div>
 
@@ -366,6 +477,24 @@ export function ChatPanel() {
       </div>
 
       <div className="shrink-0 border-t border-gitlore-border p-3">
+        {starterChips.length > 0 && (
+          <div
+            ref={chipsScrollRef}
+            className="mb-2 flex gap-1.5 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          >
+            {starterChips.map((chip) => (
+              <button
+                key={chip}
+                type="button"
+                disabled={loading || !repoReady}
+                onClick={() => void sendChatQuestion(chip)}
+                className="shrink-0 rounded-full border border-gitlore-border bg-gitlore-code px-2.5 py-1 font-code text-[11px] text-gitlore-text-secondary transition-colors hover:border-gitlore-accent/50 hover:text-gitlore-text disabled:opacity-50"
+              >
+                {chip.length > 48 ? `${chip.slice(0, 46)}…` : chip}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="flex gap-2">
           <input
             type="text"
@@ -376,6 +505,29 @@ export function ChatPanel() {
             disabled={loading || !repoReady}
             className="min-w-0 flex-1 rounded-sm border border-gitlore-border bg-gitlore-code px-3 py-2 text-sm text-gitlore-text placeholder:text-gitlore-text-secondary/50 focus:border-gitlore-accent focus:outline-none"
           />
+          {speechOk ? (
+            <button
+              type="button"
+              title="Speak question"
+              disabled={loading || micBusy || !repoReady}
+              onClick={() => {
+                if (micBusy || loading || !repoReady) return;
+                setMicBusy(true);
+                void recognizeSpeechOnce(browserSpeechLang())
+                  .then((text) => {
+                    const t = text.trim();
+                    if (t) setInput((prev) => (prev ? `${prev} ${t}` : t));
+                  })
+                  .catch(() => {
+                    toast({ message: "Speech recognition failed or was cancelled.", type: "error" });
+                  })
+                  .finally(() => setMicBusy(false));
+              }}
+              className="shrink-0 rounded-sm border border-gitlore-border bg-gitlore-code px-3 py-2 text-gitlore-text-secondary transition-colors hover:border-gitlore-accent/50 hover:text-gitlore-text disabled:opacity-50"
+            >
+              <Mic className={`h-4 w-4 ${micBusy ? "animate-pulse" : ""}`} />
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => void handleSend()}

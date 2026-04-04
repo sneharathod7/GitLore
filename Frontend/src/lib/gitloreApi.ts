@@ -124,7 +124,7 @@ export function narrativeFromAnalyzeApi(raw: Record<string, unknown>): InsightNa
         return {
           color,
           label: `PR #${num}`,
-          sublabel: trunc(title, 36),
+          sublabel: trunc(title, 24),
           date: typeof date === "string" && date !== "open" ? new Date(date).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : (date === "open" ? "open" : ""),
         };
       }
@@ -135,7 +135,7 @@ export function narrativeFromAnalyzeApi(raw: Record<string, unknown>): InsightNa
         return {
           color,
           label: num ? `Issue #${num}` : trunc(title, 28),
-          sublabel: num ? trunc(title, 36) : "Issue",
+          sublabel: num ? trunc(title, 24) : "Issue",
           date: date ? new Date(date).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "",
         };
       }
@@ -241,8 +241,12 @@ export async function postJSON<T>(path: string, body: unknown): Promise<T> {
   }
   if (!res.ok) {
     // Prefer `message` when both exist (e.g. analyze 500: error title + actionable message).
-    const msg =
+    let msg =
       (data.message as string) || (data.error as string) || res.statusText;
+    if (res.status === 401) {
+      msg =
+        "Your GitHub session is missing or expired. Sign out and sign in again with GitHub, or refresh the page.";
+    }
     throw new Error(msg);
   }
   return data as T;
@@ -272,6 +276,73 @@ export async function explainComment(body: {
 }): Promise<InsightExplanation> {
   const raw = await postJSON<Record<string, unknown>>("/api/explain", body);
   return explanationFromApi(raw);
+}
+
+/** ReviewLens auto-fix (classify + tiered fixes). */
+export type AutoFixClassification = "AUTO_FIXABLE" | "SUGGEST_FIX" | "MANUAL_REVIEW" | "COMPLEX";
+
+export type AutoFixClassifiedRow = {
+  comment_id: number;
+  path: string;
+  line: number;
+  author: string;
+  body: string;
+  classification: AutoFixClassification;
+  score: number;
+  signals: {
+    text_pattern: { category: string; score: number };
+    suggestion_block: { found: boolean; score: number; preview?: string };
+    diff_scope: { estimated_lines: number; score: number };
+    reviewer_type: { is_bot: boolean; score: number };
+    pattern_match: { pattern: string | null; score: number };
+  };
+  fix: {
+    tier: 1 | 2 | 3;
+    tier_label: "extracted" | "rule-based" | "ai-generated";
+    original_code: string;
+    fixed_code: string;
+    description: string;
+    validation: { passed: boolean; warnings: string[] };
+  } | null;
+};
+
+export type AutoFixClassifyResponse = {
+  pr_number: number;
+  total_comments: number;
+  classified: AutoFixClassifiedRow[];
+  summary: {
+    auto_fixable: number;
+    suggest_fix: number;
+    manual_review: number;
+    complex: number;
+  };
+};
+
+export async function postAutoFixClassify(owner: string, name: string, pullNumber: number): Promise<AutoFixClassifyResponse> {
+  return postJSON<AutoFixClassifyResponse>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${pullNumber}/auto-fix/classify`,
+    {}
+  );
+}
+
+export type AutoFixApplyResponse = {
+  status: string;
+  branch: string;
+  draft_pr: { number: number; url: string; title: string };
+  applied: Array<{ comment_id: number; commit_sha: string; file: string; tier: number }>;
+  failed: Array<{ comment_id: number; reason: string }>;
+};
+
+export async function postAutoFixApply(
+  owner: string,
+  name: string,
+  pullNumber: number,
+  body: { comment_ids: number[]; branch_name?: string }
+): Promise<AutoFixApplyResponse> {
+  return postJSON<AutoFixApplyResponse>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pulls/${pullNumber}/auto-fix/apply`,
+    body
+  );
 }
 
 export interface SearchResultItem {
@@ -408,6 +479,25 @@ export async function fetchRepoOverview(
   return getJSON<RepoOverviewResponse>(`/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${q}`);
 }
 
+export type ChurnHotspot = {
+  file: string;
+  prCount: number;
+  types: string[];
+  prs: Array<{ number: number; type: string; title: string }>;
+};
+
+export type DecisionOscillation = {
+  earlier: { pr_number: number; title: string; decision: string };
+  later: { pr_number: number; title: string; decision: string };
+  sharedTerms: string[];
+};
+
+export type DecisionTimelineMonth = {
+  month: string;
+  count: number;
+  types: Record<string, number>;
+};
+
 export type RepoPatternInsightsResponse = {
   explain: {
     labels: Array<{ text: string; count: number }>;
@@ -423,6 +513,28 @@ export type RepoPatternInsightsResponse = {
     byConfidence: { high: number; medium: number; low: number };
     topFiles: Array<{ path: string; count: number }>;
   };
+  churnHotspots: ChurnHotspot[];
+  decisionOscillations: DecisionOscillation[];
+  decisionTimeline: DecisionTimelineMonth[];
+};
+
+export type PatternScanMatch = { file: string; line: number; snippet: string };
+
+export type PatternScanResultRow = {
+  patternId: string;
+  name: string;
+  severity: "critical" | "high" | "medium" | "low";
+  category: "security" | "performance" | "reliability" | "maintainability";
+  matchCount: number;
+  matches: PatternScanMatch[];
+};
+
+export type RepoPatternScanResponse = {
+  scannedAt: string;
+  fileCount: number;
+  cached: boolean;
+  branch: string;
+  patterns: PatternScanResultRow[];
 };
 
 export async function fetchRepoPatternInsights(
@@ -431,6 +543,20 @@ export async function fetchRepoPatternInsights(
 ): Promise<RepoPatternInsightsResponse> {
   return getJSON<RepoPatternInsightsResponse>(
     `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/pattern-insights`
+  );
+}
+
+export async function fetchRepoPatternScan(
+  owner: string,
+  name: string,
+  opts?: { branch?: string; refresh?: boolean }
+): Promise<RepoPatternScanResponse> {
+  const q = new URLSearchParams();
+  if (opts?.branch) q.set("branch", opts.branch);
+  if (opts?.refresh) q.set("refresh", "1");
+  const suffix = q.toString() ? `?${q.toString()}` : "";
+  return getJSON<RepoPatternScanResponse>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/scan-patterns${suffix}`
   );
 }
 
@@ -597,6 +723,36 @@ export async function fetchChatGraphStatus(
   );
 }
 
+/** Repo-specific starter questions from ingested KG (types + topics). */
+export async function fetchChatSuggestions(owner: string, name: string): Promise<string[]> {
+  const j = await getJSON<{ suggestions?: string[] }>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/chat/suggestions`
+  );
+  return Array.isArray(j.suggestions) ? j.suggestions : [];
+}
+
+export type KgFileRelatedItem = {
+  pr_number: number;
+  pr_url: string;
+  title: string;
+  summary: string;
+  score: number;
+  match_kind: "file" | "semantic" | "both";
+};
+
+/** Top merged PRs related to a file path (touched files + semantic search). */
+export async function postKgFileRelated(
+  owner: string,
+  name: string,
+  path: string
+): Promise<KgFileRelatedItem[]> {
+  const j = await postJSON<{ items?: KgFileRelatedItem[] }>(
+    `/api/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/kg/file-related`,
+    { path }
+  );
+  return Array.isArray(j.items) ? j.items : [];
+}
+
 export async function fetchRepoIndex(
   owner: string,
   name: string,
@@ -655,6 +811,8 @@ export interface VoiceStatusResponse {
   agentReady: boolean;
   /** ElevenLabs agent + Gemini for client-tool voice Q&A */
   voiceChatGeminiReady?: boolean;
+  /** Browser mic + Gemini + TTS (no ConvAI agent tools required) */
+  browserVoiceQaReady?: boolean;
   /** ConvAI / LiveKit region — must match your ElevenLabs workspace */
   elevenlabsServerLocation?: string;
   ttsModel: string;
@@ -701,10 +859,17 @@ function base64ToBlob(base64: string, mimeType: string): Blob {
   return new Blob([bytes], { type: mimeType });
 }
 
-export async function postVoiceTts(text: string, opts?: { locale?: "en" | "hi" }): Promise<VoiceTtsResult> {
+export async function postVoiceTts(
+  text: string,
+  opts?: { locale?: "en" | "hi"; skipTranslate?: boolean }
+): Promise<VoiceTtsResult> {
   const res = await apiFetch("/api/voice/tts", {
     method: "POST",
-    body: JSON.stringify({ text, locale: opts?.locale ?? "en" }),
+    body: JSON.stringify({
+      text,
+      locale: opts?.locale ?? "en",
+      ...(opts?.skipTranslate ? { skip_translate: true } : {}),
+    }),
   });
   if (!res.ok) {
     let msg = res.statusText;
@@ -734,4 +899,43 @@ export async function postVoiceTts(text: string, opts?: { locale?: "en" | "hi" }
     blob: base64ToBlob(data.audioBase64, data.mimeType || "audio/mpeg"),
     displayText: data.displayText,
   };
+}
+
+export type EnforcementLogEntry = {
+  timestamp: string;
+  user: string;
+  repo: string;
+  plan_id: string;
+  tool: string;
+  params: Record<string, unknown>;
+  action: "allow" | "deny";
+  reason: string;
+  policy_rule: string;
+  risk_level: string;
+  intent_token_id: string;
+  response_time_ms: number;
+  phase?: string;
+};
+
+export async function fetchEnforcementLogs(
+  owner: string,
+  name: string,
+  limit = 20
+): Promise<{ logs: EnforcementLogEntry[]; count: number }> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  return getJSON<{ logs: EnforcementLogEntry[]; count: number }>(
+    `/api/enforcement/logs/${encodeURIComponent(owner)}/${encodeURIComponent(name)}?${q}`
+  );
+}
+
+export async function postEnforcementTest(body: {
+  tool: string;
+  params?: Record<string, unknown>;
+  repo: string;
+}): Promise<{ allowed: boolean; reason: string; policy_rule: string; risk_level: string }> {
+  return postJSON("/api/enforcement/test", body);
+}
+
+export async function fetchEnforcementPolicy(): Promise<Record<string, unknown>> {
+  return getJSON<Record<string, unknown>>("/api/enforcement/policy");
 }

@@ -74,7 +74,12 @@ export function getSessionToken(c: Context): string | undefined {
 
 export async function authMiddleware(c: Context, next: Next): Promise<void | Response> {
   try {
-    const session = getSessionToken(c);
+    if (c.req.method === "GET" && c.req.path === "/api/enforcement/policy") {
+      await next();
+      return;
+    }
+
+    const session = getCookie(c, "gitlore_session");
 
     if (!session) {
       return c.json({ error: "Unauthorized" }, 401);

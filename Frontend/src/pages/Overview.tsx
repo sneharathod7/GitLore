@@ -2,8 +2,10 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { FadeIn } from "../components/effects/FadeIn";
 import { ChatPanel } from "../components/ChatPanel";
+import { EnforcementLog } from "../components/EnforcementLog";
 import { IngestButton } from "../components/IngestButton";
 import { KnowledgeDecisionsGraph } from "../components/KnowledgeDecisionsGraph";
+import { invalidateKnowledgeSuggestionsCache } from "../components/KnowledgeSuggestions";
 import { OverviewSkeleton, Spinner } from "../components/Skeleton";
 import { useAuth } from "@/context/AuthContext";
 import { useRepo } from "@/context/RepoContext";
@@ -35,7 +37,7 @@ function fmt(n: number) {
 
 const Overview = () => {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const { target, repoFull, setTarget, repoReady } = useRepo();
   const [data, setData] = useState<RepoOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -44,6 +46,7 @@ const Overview = () => {
   const [pullsLoading, setPullsLoading] = useState(false);
   const [pullsErr, setPullsErr] = useState<string | null>(null);
   const [refreshChat, setRefreshChat] = useState(0);
+  const [enforcementTick, setEnforcementTick] = useState(0);
   const [showAllPRs, setShowAllPRs] = useState(false);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const [mongoAnalytics, setMongoAnalytics] = useState<RepoAnalyticsPayload | null>(null);
@@ -51,6 +54,11 @@ const Overview = () => {
 
   const { events: liveEvents, connected: liveConnected, streamError: liveStreamErr, clearEvents } =
     useRealtimeUpdates(repoReady ? repoFull : null);
+
+  useEffect(() => {
+    if (authLoading || !user || repoReady) return;
+    navigate("/repos", { replace: true });
+  }, [authLoading, user, repoReady, navigate]);
 
   useEffect(() => {
     if (!user) {
@@ -441,10 +449,12 @@ const Overview = () => {
             <KnowledgeDecisionsGraph refreshKey={refreshChat} />
             <IngestButton
               onComplete={() => {
+                invalidateKnowledgeSuggestionsCache();
                 setRefreshChat((p) => p + 1);
               }}
             />
-            <ChatPanel />
+            <ChatPanel key={refreshChat} onChatComplete={() => setEnforcementTick((t) => t + 1)} />
+            <EnforcementLog refreshKey={refreshChat + enforcementTick} />
           </div>
         </div>
       </div>

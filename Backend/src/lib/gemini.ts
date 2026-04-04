@@ -1,12 +1,16 @@
-import {
-  GoogleGenerativeAI,
-  TaskType,
-  FinishReason,
-} from "@google/generative-ai";
+import { GoogleGenAI, FinishReason } from "@google/genai";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+/** Shared Gemini API client (Gemini Developer API). Prefer this over the deprecated `@google/generative-ai` package. */
+let _googleGenAI: GoogleGenAI | null = null;
+export function getGoogleGenAI(): GoogleGenAI {
+  if (!_googleGenAI) {
+    _googleGenAI = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY?.trim() || "",
+    });
+  }
+  return _googleGenAI;
+}
 
 /**
  * Text generation (PR knowledge extraction, narratives, review explanations).
@@ -37,6 +41,21 @@ export function isGeminiRateLimitError(err: unknown): boolean {
   const status = (err as { status?: number })?.status;
   const code = (err as { code?: number })?.code;
   return status === 429 || code === 429;
+}
+
+/** Shown in the app when Gemini fails (quota, key, 403, etc.). Details stay in server logs only. */
+export const GEMINI_CLIENT_FRIENDLY_MESSAGE =
+  "The AI service could not complete this request. Its usage limit may have been reached, or the API key is missing or invalid. Please try again later.";
+
+/** True when the error text clearly comes from our Gemini / Google AI calls. */
+export function isLikelyGeminiRelatedError(raw: string): boolean {
+  return (
+    /from Gemini:/i.test(raw) ||
+    /GoogleGenerativeAI|generativelanguage\.googleapis|GEMINI_API_KEY|\bgemini-[\w.-]+/i.test(
+      raw
+    ) ||
+    /generateContent|embedContent|TaskType\.RETRIEVAL_DOCUMENT/i.test(raw)
+  );
 }
 
 /** Expired, revoked, or malformed API key (retries will not help). */
@@ -307,10 +326,7 @@ JSON rules (critical): You must output valid JSON only. Do not put raw double-qu
  * Generate explanation for a code review comment (Gemini 2.5 Flash structured JSON).
  */
 export async function explainComment(input: ExplainCommentInput): Promise<Explanation> {
-  const explainModel = genAI.getGenerativeModel(
-    { model: GEMINI_EXPLAIN_MODEL },
-    { apiVersion: "v1beta" }
-  );
+  const ai = getGoogleGenAI();
 
   const patternBlock = input.patternTemplate
     ? `\nMatched pattern template:\n${clipForPrompt("pattern", input.patternTemplate, 6000)}\n`
@@ -351,27 +367,24 @@ ${patternBlock}`;
 
   const runGenerate = (text: string) =>
     withGemini429Retry(() =>
-      explainModel.generateContent({
-        contents: [{ role: "user", parts: [{ text }] }],
-        // v1beta fields not in SDK typings
-        generationConfig: {
+      ai.models.generateContent({
+        model: GEMINI_EXPLAIN_MODEL,
+        contents: text,
+        config: {
           ...explainJsonGenerationConfig,
-        } as (typeof structuredJsonGenerationConfig & {
-          responseMimeType?: string;
-        }),
+        },
       })
     );
 
   try {
     let result = await runGenerate(prompt);
-    let responseText =
-      result.response.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    let responseText = result.text ?? "";
 
     if (!responseText) {
       return emptyExplanation();
     }
 
-    const finishReason = result.response.candidates?.[0]?.finishReason;
+    const finishReason = result.candidates?.[0]?.finishReason;
     const needsCompactRetry = finishReason === FinishReason.MAX_TOKENS;
 
     const tryParse = (t: string) => parseModelJson(t, explanationSchema);
@@ -399,8 +412,7 @@ Diff excerpt:
 ${clipForPrompt("diff", input.diffHunk, 3500)}`;
 
     result = await runGenerate(compactPrompt);
-    responseText =
-      result.response.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    responseText = result.text ?? "";
     if (!responseText) {
       throw new Error("Empty response after compact explain retry");
     }
@@ -410,6 +422,79 @@ ${clipForPrompt("diff", input.diffHunk, 3500)}`;
     throw new Error(
       `Failed to generate explanation from Gemini: ${safeErrText(error)}`
     );
+  }
+}
+
+const minimalFixSchema = z.object({
+  result: z.enum(["ok", "COMPLEX", "UNCERTAIN"]),
+  new_region: z.string().optional(),
+});
+
+export type MinimalFixInput = {
+  comment: string;
+  filePath: string;
+  language: string;
+  regionStartLine: number;
+  regionEndLine: number;
+  regionSource: string;
+};
+
+/**
+ * Tier-3 auto-fix: minimal edit only. Returns replacement text for the given line range, or refusal.
+ */
+export async function generateMinimalFix(
+  input: MinimalFixInput
+): Promise<
+  { ok: true; newRegion: string } | { ok: false; reason: "complex" | "uncertain" | "error" }
+> {
+  const key = process.env.GEMINI_API_KEY?.trim();
+  if (!key) return { ok: false, reason: "error" };
+
+  const ai = getGoogleGenAI();
+  const sys = `You are a code review auto-fixer. Generate the MINIMAL change to address the review comment.
+
+Rules:
+- Change as FEW lines as possible within the region shown (ideally 1–5 lines).
+- NEVER refactor code outside what the comment asks.
+- NEVER add features beyond the comment.
+- Return JSON only with keys: result ("ok" | "COMPLEX" | "UNCERTAIN"), new_region (string, only when result is "ok").
+- new_region must be the FULL replacement text for lines ${input.regionStartLine}–${input.regionEndLine} inclusive (same number of logical lines as that range, or fewer if deleting lines). Use \\n for newlines inside the string.
+- If the fix needs more than ~15 changed lines or you are not confident, use COMPLEX or UNCERTAIN instead of ok.
+- Do not wrap new_region in markdown fences inside the JSON string.`;
+
+  const prompt = `${sys}
+
+File: ${input.filePath}
+Language: ${input.language}
+Comment: ${JSON.stringify(input.comment)}
+
+Replace lines ${input.regionStartLine}–${input.regionEndLine} (inclusive). Current region:
+---
+${clipForPrompt("region", input.regionSource, 12_000)}
+---
+
+Respond with one JSON object: { "result": "ok"|"COMPLEX"|"UNCERTAIN", "new_region": "..." }`;
+
+  try {
+    const result = await withGemini429Retry(() =>
+      ai.models.generateContent({
+        model: GEMINI_EXPLAIN_MODEL,
+        contents: prompt,
+        config: {
+          ...explainJsonGenerationConfig,
+        },
+      })
+    );
+    const text = result.text?.trim() ?? "";
+    if (!text) return { ok: false, reason: "uncertain" };
+    const parsed = parseModelJson(text, minimalFixSchema);
+    if (parsed.result === "COMPLEX") return { ok: false, reason: "complex" };
+    if (parsed.result === "UNCERTAIN") return { ok: false, reason: "uncertain" };
+    if (!parsed.new_region?.trim()) return { ok: false, reason: "uncertain" };
+    return { ok: true, newRegion: parsed.new_region.replace(/\\n/g, "\n") };
+  } catch (e) {
+    logGeminiFailure("generateMinimalFix", e);
+    return { ok: false, reason: "error" };
   }
 }
 
@@ -423,7 +508,7 @@ export async function generateNarrative(
   reviewComments: Array<{ author: string; text: string }>,
   issues: Array<{ title: string; body: string }>
 ): Promise<Narrative> {
-  const model = genAI.getGenerativeModel({ model: GEMINI_GENERATION_MODEL });
+  const ai = getGoogleGenAI();
 
   const contextData = [
     commitMessage && `Commit: ${commitMessage}`,
@@ -461,14 +546,14 @@ ${contextData}`;
 
   try {
     const result = await withGemini429Retry(() =>
-      model.generateContent({
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: structuredJsonGenerationConfig,
+      ai.models.generateContent({
+        model: GEMINI_GENERATION_MODEL,
+        contents: prompt,
+        config: structuredJsonGenerationConfig,
       })
     );
 
-    const responseText =
-      result.response.candidates?.[0]?.content?.parts?.[0]?.text;
+    const responseText = result.text;
 
     if (!responseText) {
       return {
@@ -534,8 +619,7 @@ export function matchAntiPattern(
 
 /**
  * Comma-separated in GEMINI_EMBEDDING_MODELS.
- * Default order: models that work with Generative Language API v1 + @google/generative-ai embedContent
- * (gemini-embedding-001 often 404s on v1 — see https://ai.google.dev/gemini-api/docs/embeddings).
+ * Default order for @google/genai embedContent (see https://ai.google.dev/gemini-api/docs/embeddings).
  */
 function embeddingModelCandidates(): string[] {
   const raw = process.env.GEMINI_EMBEDDING_MODELS?.trim();
@@ -563,36 +647,31 @@ export async function getEmbedding(
   if (!key) return null;
 
   const chunk = text.slice(0, 8000);
-  const taskType =
-    role === "query" ? TaskType.RETRIEVAL_QUERY : TaskType.RETRIEVAL_DOCUMENT;
+  const taskType = role === "query" ? "RETRIEVAL_QUERY" : "RETRIEVAL_DOCUMENT";
+  const ai = getGoogleGenAI();
 
   for (const modelName of embeddingModelCandidates()) {
     try {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const attempts: Array<() => Promise<{ embedding?: { values?: number[] } }>> = [
-        () => model.embedContent(chunk),
-        () =>
-          model.embedContent({
-            content: { role: "user", parts: [{ text: chunk }] },
-          }),
-        () =>
-          model.embedContent({
-            content: { role: "user", parts: [{ text: chunk }] },
-            taskType,
-          }),
-      ];
-      for (const run of attempts) {
-        try {
-          const res = await run();
-          const values = res?.embedding?.values;
-          if (Array.isArray(values) && values.length > 0) return values;
-        } catch (e) {
-          if (isGeminiRateLimitError(e)) throw e;
-        }
+      const config: {
+        taskType: string;
+        outputDimensionality?: number;
+      } = { taskType };
+      if (!/embedding-001$/i.test(modelName) && !modelName.includes("embedding-001")) {
+        config.outputDimensionality = 768;
       }
+      const res = await ai.models.embedContent({
+        model: modelName,
+        contents: chunk,
+        config,
+      });
+      const values = res.embeddings?.[0]?.values;
+      if (Array.isArray(values) && values.length > 0) return values;
     } catch (err) {
       if (isGeminiRateLimitError(err)) throw err;
-      console.warn(`getEmbedding model ${modelName} failed:`, err instanceof Error ? err.message : err);
+      console.warn(
+        `getEmbedding model ${modelName} failed:`,
+        err instanceof Error ? err.message : err
+      );
     }
   }
   return null;
@@ -606,7 +685,7 @@ export async function translateEnglishToHindiForSpeech(english: string): Promise
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key) throw new Error("GEMINI_API_KEY not configured");
 
-  const model = genAI.getGenerativeModel({ model: GEMINI_GENERATION_MODEL });
+  const ai = getGoogleGenAI();
   const prompt = `You translate English into natural Hindi suitable for text-to-speech.
 
 Rules:
@@ -619,19 +698,20 @@ English to translate:
 ${english}`;
 
   const result = await withGemini429Retry(() =>
-    model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    ai.models.generateContent({
+      model: GEMINI_GENERATION_MODEL,
+      contents: prompt,
     })
   );
 
-  const text = result.response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  const text = result.text?.trim();
   if (!text) throw new Error("Empty Hindi translation from model");
   return text.length > 5000 ? `${text.slice(0, 4999)}…` : text;
 }
 
 /**
- * Spoken Q&A for ElevenLabs voice agent (client tool → this via API).
- * Context must be the full GitLore narrative summary; answer is plain English for TTS.
+ * Spoken Q&A for voice (browser mic or ElevenLabs client tool → this via API).
+ * Replies in the same language as the question (English or Devanagari Hindi for TTS).
  */
 export async function voiceStoryAnswer(contextText: string, userQuestion: string): Promise<string> {
   const key = process.env.GEMINI_API_KEY?.trim();
@@ -640,7 +720,7 @@ export async function voiceStoryAnswer(contextText: string, userQuestion: string
   const ctx = contextText.slice(0, 12_000);
   const q = userQuestion.trim().slice(0, 2000);
 
-  const model = genAI.getGenerativeModel({ model: GEMINI_GENERATION_MODEL });
+  const ai = getGoogleGenAI();
   const prompt = `You are answering a developer who is asking by voice about a single line of code in a GitHub repository.
 
 The following text is the ONLY source of truth (from GitLore: blame, PRs, discussion, decision, impact). Do not invent commits, people, PR numbers, or events that are not clearly supported by this text.
@@ -649,24 +729,28 @@ The following text is the ONLY source of truth (from GitLore: blame, PRs, discus
 ${ctx}
 --- END CONTEXT ---
 
-The user asked (spoken): "${q.replace(/"/g, "'")}"
+The user asked (spoken, may be English or Hindi): "${q.replace(/"/g, "'")}"
 
-Reply in plain English suitable to be read aloud by a voice assistant:
-- Start directly with the answer; no "Sure!" preamble unless it is one short word.
+LANGUAGE — match the user's question:
+- If they wrote or spoke primarily in English (Latin script), reply in clear spoken English.
+- If they used Hindi (Devanagari) or clear Hinglish/Hindi intent, reply in **Devanagari Hindi** suitable for Indian text-to-speech (short sentences; keep repo paths, PR numbers, and file names in Latin when clearer).
+
+STYLE (any language):
+- Start directly with the answer; avoid long filler.
 - Use 2 to 6 short sentences unless they clearly ask for more detail.
-- If the context does not contain the answer, say that this summary does not include that information and suggest what you can answer from the story instead.
-- No markdown, bullet lists, or code fences. You may say short paths or PR numbers inline.
-- Be accurate, concrete, and easy to understand.
+- If the context does not contain the answer, say the summary does not include that and suggest what you can answer from the story instead.
+- No markdown, bullet lists, or code fences.
 
 Your reply:`;
 
   const result = await withGemini429Retry(() =>
-    model.generateContent({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    ai.models.generateContent({
+      model: GEMINI_GENERATION_MODEL,
+      contents: prompt,
     })
   );
 
-  const text = result.response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  const text = result.text?.trim();
   if (!text) throw new Error("Empty voice answer from model");
   return text.length > 4000 ? `${text.slice(0, 3999)}…` : text;
 }

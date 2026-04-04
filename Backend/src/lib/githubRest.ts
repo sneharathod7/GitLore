@@ -34,6 +34,29 @@ export async function githubRestJson<T>(token: string, path: string): Promise<T>
   return JSON.parse(text) as T;
 }
 
+export async function githubRestJsonMethod<T>(
+  token: string,
+  method: "POST" | "PUT" | "PATCH",
+  path: string,
+  body: unknown
+): Promise<T> {
+  const res = await fetch(`${GH_API}${path}`, {
+    method,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new GithubRestError(res.status, text.slice(0, 500));
+  }
+  return text ? (JSON.parse(text) as T) : ({} as T);
+}
+
 export async function githubRestText(
   token: string,
   path: string,
@@ -467,6 +490,154 @@ export async function getRepoFileContent(
   return { text: null, isBinary: true, size: data.size ?? 0 };
 }
 
+/** Contents API blob: includes `sha` required for PUT updates. */
+export async function getRepoFileBlobAtRef(
+  token: string,
+  owner: string,
+  repo: string,
+  filePath: string,
+  ref: string
+): Promise<{ text: string | null; sha: string | null; isBinary: boolean; size: number }> {
+  const path = filePath.replace(/^\//, "");
+  const q = new URLSearchParams();
+  if (ref) q.set("ref", ref);
+  const encPath = path
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  const data = await githubRestJson<{
+    content?: string;
+    encoding?: string;
+    size?: number;
+    sha?: string;
+    message?: string;
+  }>(token, `${githubRepoApiRoot(owner, repo)}/contents/${encPath}?${q}`);
+
+  const sha = typeof data.sha === "string" ? data.sha : null;
+  if (data.encoding === "base64" && data.content) {
+    const raw = Buffer.from(data.content.replace(/\n/g, ""), "base64");
+    const NUL = raw.indexOf(0);
+    if (NUL !== -1) {
+      return { text: null, sha, isBinary: true, size: data.size ?? raw.length };
+    }
+    return {
+      text: raw.toString("utf8"),
+      sha,
+      isBinary: false,
+      size: data.size ?? raw.length,
+    };
+  }
+
+  return { text: null, sha, isBinary: true, size: data.size ?? 0 };
+}
+
+/** Create a branch ref pointing at `sha` (commit SHA). */
+export async function createGitRef(
+  token: string,
+  owner: string,
+  repo: string,
+  refName: string,
+  sha: string
+): Promise<{ ref: string; url: string }> {
+  const ref = refName.startsWith("refs/") ? refName : `refs/heads/${refName}`;
+  return githubRestJsonMethod<{ ref: string; url: string }>(
+    token,
+    "POST",
+    `${githubRepoApiRoot(owner, repo)}/git/refs`,
+    { ref, sha }
+  );
+}
+
+/**
+ * Point an existing ref at `sha`. Use `force: true` to reset a branch (e.g. re-run auto-fix from current PR head).
+ * `refName`: short branch name or `refs/heads/...`.
+ */
+export async function updateGitRef(
+  token: string,
+  owner: string,
+  repo: string,
+  refName: string,
+  sha: string,
+  force = false
+): Promise<{ ref: string; url: string }> {
+  const branchShort = refName.startsWith("refs/heads/")
+    ? refName.slice("refs/heads/".length)
+    : refName.startsWith("refs/")
+      ? refName.replace(/^refs\/heads\//, "")
+      : refName;
+  const refPath = encodeURIComponent(`heads/${branchShort}`);
+  return githubRestJsonMethod<{ ref: string; url: string }>(
+    token,
+    "PATCH",
+    `${githubRepoApiRoot(owner, repo)}/git/refs/${refPath}`,
+    { sha, force }
+  );
+}
+
+/** Update a file on a branch (creates a commit). */
+export async function updateRepoFileContents(
+  token: string,
+  owner: string,
+  repo: string,
+  filePath: string,
+  branch: string,
+  message: string,
+  newUtf8Content: string,
+  fileSha: string
+): Promise<{ commit: { sha: string }; content: { sha: string } }> {
+  const path = filePath.replace(/^\//, "");
+  const encPath = path
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  const content = Buffer.from(newUtf8Content, "utf8").toString("base64");
+  return githubRestJsonMethod(
+    token,
+    "PUT",
+    `${githubRepoApiRoot(owner, repo)}/contents/${encPath}`,
+    {
+      message,
+      content,
+      sha: fileSha,
+      branch,
+    }
+  );
+}
+
+export type CreatedPullRest = {
+  number: number;
+  html_url: string;
+  title: string;
+  draft: boolean;
+};
+
+/** Open a pull request (use draft: true for auto-fix flow). */
+export async function createPullRequestRest(
+  token: string,
+  owner: string,
+  repo: string,
+  body: {
+    title: string;
+    body: string;
+    head: string;
+    base: string;
+    draft?: boolean;
+  }
+): Promise<CreatedPullRest> {
+  return githubRestJsonMethod<CreatedPullRest>(
+    token,
+    "POST",
+    `${githubRepoApiRoot(owner, repo)}/pulls`,
+    {
+      title: body.title,
+      body: body.body,
+      head: body.head,
+      base: body.base,
+      draft: body.draft ?? false,
+    }
+  );
+}
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -501,6 +672,25 @@ export async function aggregatePatternCounts(
     .slice(0, 12);
 }
 
+export type ChurnHotspot = {
+  file: string;
+  prCount: number;
+  types: string[];
+  prs: Array<{ number: number; type: string; title: string }>;
+};
+
+export type DecisionOscillation = {
+  earlier: { pr_number: number; title: string; decision: string };
+  later: { pr_number: number; title: string; decision: string };
+  sharedTerms: string[];
+};
+
+export type DecisionTimelineMonth = {
+  month: string;
+  count: number;
+  types: Record<string, number>;
+};
+
 /** Repo-scoped pattern / theme insights for the Patterns UI (Mongo only, not cached with repo overview). */
 export type RepoPatternInsights = {
   explain: {
@@ -517,6 +707,9 @@ export type RepoPatternInsights = {
     byConfidence: { high: number; medium: number; low: number };
     topFiles: Array<{ path: string; count: number }>;
   };
+  churnHotspots: ChurnHotspot[];
+  decisionOscillations: DecisionOscillation[];
+  decisionTimeline: DecisionTimelineMonth[];
 };
 
 export async function aggregateRepoPatternInsights(
@@ -602,6 +795,115 @@ export async function aggregateRepoPatternInsights(
     .sort((a, b) => b.count - a.count)
     .slice(0, 12);
 
+  let churnHotspots: ChurnHotspot[] = [];
+  try {
+    const churnRaw = await db
+      .collection("knowledge_nodes")
+      .aggregate([
+        { $match: { repo: repoRe, changed_files: { $exists: true, $type: "array", $ne: [] } } },
+        { $unwind: "$changed_files" },
+        { $match: { changed_files: { $type: "string", $ne: "" } } },
+        {
+          $group: {
+            _id: "$changed_files",
+            prCount: { $sum: 1 },
+            types: { $addToSet: "$type" },
+            prs: { $push: { number: "$pr_number", type: "$type", title: "$title" } },
+          },
+        },
+        { $match: { prCount: { $gte: 2 } } },
+        { $sort: { prCount: -1 } },
+        { $limit: 10 },
+      ])
+      .toArray();
+    churnHotspots = churnRaw.map((x) => ({
+      file: String(x._id),
+      prCount: x.prCount as number,
+      types: (x.types as string[]).filter(Boolean).map(String),
+      prs: ((x.prs as Array<{ number?: number; type?: string; title?: string }>) || []).map((p) => ({
+        number: Number(p.number) || 0,
+        type: String(p.type || "other"),
+        title: String(p.title || "").slice(0, 200),
+      })),
+    }));
+  } catch {
+    churnHotspots = [];
+  }
+
+  const kgNodes = await db
+    .collection("knowledge_nodes")
+    .find({ repo: repoRe })
+    .project({
+      pr_number: 1,
+      title: 1,
+      decision: 1,
+      alternatives: 1,
+      merged_at: 1,
+      type: 1,
+    })
+    .limit(80)
+    .toArray();
+
+  const decisionTimelineMap = new Map<string, { count: number; types: Record<string, number> }>();
+  for (const n of kgNodes) {
+    const raw = (n as any).merged_at;
+    const d = raw ? new Date(raw) : null;
+    if (!d || Number.isNaN(d.getTime())) continue;
+    const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const ty = String((n as any).type || "other");
+    const cur = decisionTimelineMap.get(month) || { count: 0, types: {} };
+    cur.count++;
+    cur.types[ty] = (cur.types[ty] || 0) + 1;
+    decisionTimelineMap.set(month, cur);
+  }
+  const decisionTimeline: DecisionTimelineMonth[] = [...decisionTimelineMap.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([month, v]) => ({ month, count: v.count, types: v.types }));
+
+  const decisionOscillations: DecisionOscillation[] = [];
+  const seenPair = new Set<string>();
+  const wordRe = /\w+/g;
+  for (let i = 0; i < kgNodes.length; i++) {
+    for (let j = 0; j < kgNodes.length; j++) {
+      if (i === j) continue;
+      const a = kgNodes[i] as any;
+      const b = kgNodes[j] as any;
+      const ta = a.merged_at ? new Date(a.merged_at).getTime() : 0;
+      const tb = b.merged_at ? new Date(b.merged_at).getTime() : 0;
+      if (!(ta && tb && ta < tb)) continue;
+      const alts: string[] = Array.isArray(a.alternatives) ? a.alternatives.map(String) : [];
+      const decisionB = String(b.decision || "");
+      if (!alts.length || !decisionB.trim()) continue;
+      const shared = new Set<string>();
+      for (const alt of alts) {
+        const words = alt.toLowerCase().match(wordRe) || [];
+        for (const w of words) {
+          if (w.length <= 5) continue;
+          if (decisionB.toLowerCase().includes(w)) shared.add(w);
+        }
+      }
+      if (shared.size === 0) continue;
+      const key = `${a.pr_number}-${b.pr_number}`;
+      if (seenPair.has(key)) continue;
+      seenPair.add(key);
+      decisionOscillations.push({
+        earlier: {
+          pr_number: Number(a.pr_number),
+          title: String(a.title || "").slice(0, 160),
+          decision: String(a.decision || "").slice(0, 400),
+        },
+        later: {
+          pr_number: Number(b.pr_number),
+          title: String(b.title || "").slice(0, 160),
+          decision: String(b.decision || "").slice(0, 400),
+        },
+        sharedTerms: [...shared].slice(0, 10),
+      });
+      if (decisionOscillations.length >= 10) break;
+    }
+    if (decisionOscillations.length >= 10) break;
+  }
+
   return {
     explain: { labels, rowCount: explainDocs.length },
     knowledgeGraph: { prNodeCount, byType, topTopics },
@@ -610,6 +912,9 @@ export async function aggregateRepoPatternInsights(
       byConfidence: { high, medium, low },
       topFiles,
     },
+    churnHotspots,
+    decisionOscillations,
+    decisionTimeline,
   };
 }
 

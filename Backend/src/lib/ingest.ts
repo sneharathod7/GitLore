@@ -3,12 +3,10 @@ import { getDB } from "./mongo";
 import {
   getEmbedding,
   GEMINI_GENERATION_MODEL,
+  getGoogleGenAI,
   withGemini429Retry,
 } from "./gemini";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { z } from "zod";
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 export const knowledgeNodeSchema = z.object({
   type: z.enum([
@@ -204,7 +202,7 @@ function cleanJsonString(jsonStr: string): string {
 }
 
 export async function extractKnowledge(pr: any): Promise<KnowledgeNode> {
-  const model = genAI.getGenerativeModel({ model: GEMINI_GENERATION_MODEL });
+  const ai = getGoogleGenAI();
 
   const reviewNodes = (pr.reviews?.nodes || []).filter((r: any) => r.body?.trim()).slice(0, 10);
   const reviews = reviewNodes
@@ -267,11 +265,12 @@ Rules:
 - Topics should be 2-5 short tags (e.g., "auth", "api-design", "database", "testing").
 - Be concise.`;
 
-  const result = await model.generateContent({
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
+  const result = await ai.models.generateContent({
+    model: GEMINI_GENERATION_MODEL,
+    contents: prompt,
   });
 
-  const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
+  const responseText = result.text;
   if (!responseText) {
     throw new Error("Empty Gemini response");
   }
@@ -385,8 +384,12 @@ export async function ingestRepo(
         batch.map(async (pr) => {
           const knowledge = await withGemini429Retry(() => extractKnowledge(pr));
           const topics = (knowledge.topics || []).join(", ");
+          const issueBodies = (pr.closingIssuesReferences?.nodes || [])
+            .map((i: any) => trunc(String(i.body || "").replace(/\s+/g, " "), 400))
+            .filter(Boolean)
+            .join(" ");
           const embeddingText =
-            `${knowledge.title}. ${knowledge.summary}. ${knowledge.decision}. Topics: ${topics}`.trim();
+            `${knowledge.title}. ${knowledge.summary}. ${knowledge.problem}. ${knowledge.decision}. Topics: ${topics}. Linked issue context: ${issueBodies}`.trim();
           let embedding: number[] | null = null;
           try {
             embedding = await withGemini429Retry(() => getEmbedding(embeddingText, "document"), {
@@ -407,6 +410,8 @@ export async function ingestRepo(
             number: i.number,
             title: i.title || `Issue #${i.number}`,
             url: `https://github.com/${owner}/${repo}/issues/${i.number}`,
+            /** Short excerpt for KG chat — full issue text is not re-fetched at Q&A time. */
+            body_excerpt: trunc(String(i.body || "").replace(/\s+/g, " ").trim(), 720),
           }));
 
           const merge_commit = pr.mergeCommit
