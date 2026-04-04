@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "GitLore Backend - Code Context API",
   "main": "dist/server.js",
-  "type": "module",
   "engines": {
     "node": ">=20"
   },
