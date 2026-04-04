@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { FadeIn } from "../components/effects/FadeIn";
+import { RepoPatternCardsSkeleton, Spinner } from "../components/Skeleton";
 import { useAuth } from "@/context/AuthContext";
 import { useRepo } from "@/context/RepoContext";
 import {
@@ -88,7 +89,7 @@ function dotClass(i: number) {
 
 const Patterns = () => {
   const { user } = useAuth();
-  const { target, repoFull, repoReady, repoResolving } = useRepo();
+  const { target, repoFull, repoReady } = useRepo();
   const [refSearch, setRefSearch] = useState("");
   const [kgSearch, setKgSearch] = useState("");
   const [explainSearch, setExplainSearch] = useState("");
@@ -152,22 +153,22 @@ const Patterns = () => {
     p.name.toLowerCase().includes(refSearch.toLowerCase())
   );
 
-  if (user && repoResolving) {
-    return (
-      <div className="flex min-h-[calc(100vh-56px)] items-center justify-center bg-gitlore-bg px-4">
-        <p className="text-sm text-gitlore-text-secondary">Loading your most recently updated repository…</p>
-      </div>
-    );
-  }
-
   if (user && !repoReady) {
     return (
       <div className="min-h-[calc(100vh-56px)] bg-gitlore-bg px-4 py-12">
         <div className="mx-auto max-w-[1200px] text-center md:px-8 md:py-12">
           <h1 className="mb-2 font-heading text-2xl font-bold text-gitlore-text">Patterns & themes</h1>
           <p className="text-sm text-gitlore-text-secondary">
+
             Select a repository from the header to see knowledge-graph themes, explain labels, and line-analysis
             activity for that repo.
+
+            Select a repository on the{" "}
+            <Link to="/repos" className="text-gitlore-accent hover:text-gitlore-accent-hover">
+              repo picker
+            </Link>{" "}
+            or via the <span className="text-gitlore-text">Repositories</span> search in the header.
+
           </p>
         </div>
       </div>
@@ -203,12 +204,56 @@ const Patterns = () => {
           <p className="mb-6 text-xs text-gitlore-text-secondary">Sign in to load repository data.</p>
         )}
 
+
         {user && (
           <>
             <div className="mb-8 grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="rounded-sm border border-gitlore-border bg-gitlore-surface p-4">
                 <div className="text-[10px] font-medium uppercase tracking-wider text-gitlore-text-secondary">
                   Knowledge graph
+
+        <div className="mb-10">
+          <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
+            <div className="text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary">
+              This repository (from cached reviews)
+            </div>
+            {overviewLoading && (
+              <span className="flex items-center gap-1.5 text-xs text-gitlore-text-secondary" role="status">
+                <Spinner className="h-3.5 w-3.5" label="Loading repository patterns" />
+                Loading…
+              </span>
+            )}
+          </div>
+          <input
+            type="text"
+            placeholder="Filter detected themes…"
+            value={repoSearch}
+            onChange={(e) => setRepoSearch(e.target.value)}
+            className="mb-4 w-full max-w-md rounded-sm border border-gitlore-border bg-gitlore-code px-3 py-2 text-sm font-body text-gitlore-text outline-none transition-colors placeholder:text-gitlore-text-secondary/50 focus:border-gitlore-accent"
+          />
+          <FadeIn direction="up">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {overviewLoading && <RepoPatternCardsSkeleton />}
+              {!overviewLoading && filteredRepoAnti.length === 0 && (
+                <p className="col-span-full text-sm text-gitlore-text-secondary">
+                  No cached pattern themes yet. Use <span className="text-gitlore-text">Explain</span> on PR review comments or line analyze in Live repo; results aggregate here.
+                </p>
+              )}
+              {!overviewLoading &&
+                filteredRepoAnti.map((item) => (
+                <div
+                  key={item.text}
+                  className="flex flex-col rounded-sm border border-gitlore-border bg-gitlore-surface p-4"
+                >
+                  <div className="mb-2 flex items-start gap-2">
+                    <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${item.dot}`} />
+                    <span className="text-sm font-medium text-gitlore-text">{item.text}</span>
+                  </div>
+                  <div className="mt-auto font-code text-xs text-gitlore-text-secondary">
+                    Recorded <span className="text-gitlore-accent">{item.count}</span>{" "}
+                    {item.count === 1 ? "time" : "times"} in stored explanations
+                  </div>
+
                 </div>
                 <div className="mt-1 font-heading text-2xl font-semibold text-gitlore-accent">
                   {pageLoading ? "…" : kg?.prNodeCount ?? 0}

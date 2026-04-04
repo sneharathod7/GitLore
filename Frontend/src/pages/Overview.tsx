@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { FadeIn } from "../components/effects/FadeIn";
 import { ChatPanel } from "../components/ChatPanel";
 import { IngestButton } from "../components/IngestButton";
 import { KnowledgeDecisionsGraph } from "../components/KnowledgeDecisionsGraph";
+import { OverviewSkeleton, Spinner } from "../components/Skeleton";
 import { useAuth } from "@/context/AuthContext";
 import { useRepo } from "@/context/RepoContext";
 import { fetchRepoOverview, fetchRepoPullRequests, type RepoOverviewResponse, type RepoPullSummary } from "@/lib/gitloreApi";
@@ -27,7 +28,7 @@ function fmt(n: number) {
 const Overview = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { target, repoFull, setTarget, repoReady, repoResolving } = useRepo();
+  const { target, repoFull, setTarget, repoReady } = useRepo();
   const [data, setData] = useState<RepoOverviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -35,6 +36,8 @@ const Overview = () => {
   const [pullsLoading, setPullsLoading] = useState(false);
   const [pullsErr, setPullsErr] = useState<string | null>(null);
   const [refreshChat, setRefreshChat] = useState(0);
+  const [showAllPRs, setShowAllPRs] = useState(false);
+  const [showAllFiles, setShowAllFiles] = useState(false);
 
   useEffect(() => {
     if (!user) {
@@ -108,10 +111,6 @@ const Overview = () => {
     [navigate, setTarget]
   );
 
-  const stats = data?.stats;
-  const anti = data?.topAntiPatterns?.length ? data.topAntiPatterns : [];
-  const mostChanged = data?.mostChangedFiles?.length ? data.mostChangedFiles : [];
-
   if (!user) {
     return (
       <div className="min-h-[calc(100vh-56px)] bg-gitlore-bg px-4 py-12 text-center">
@@ -123,23 +122,36 @@ const Overview = () => {
     );
   }
 
-  if (repoResolving) {
-    return (
-      <div className="flex min-h-[calc(100vh-56px)] items-center justify-center bg-gitlore-bg px-4">
-        <p className="text-sm text-gitlore-text-secondary">Loading your most recently updated repository…</p>
-      </div>
-    );
-  }
-
   if (!repoReady) {
     return (
       <div className="min-h-[calc(100vh-56px)] bg-gitlore-bg px-4 py-12 text-center">
         <p className="mx-auto mb-2 max-w-md text-gitlore-text-secondary">
-          No repository is selected yet. Use <strong className="text-gitlore-text">Repositories</strong> in the header search to find a GitHub repo, or push a repo to your account and refresh.
+          No repository is selected yet. Open{" "}
+          <Link to="/repos" className="text-gitlore-accent hover:text-gitlore-accent-hover">
+            repository selection
+          </Link>
+          , or use <strong className="text-gitlore-text">Repositories</strong> in the header search.
         </p>
       </div>
     );
   }
+
+  const awaitingInitialContent = loading || pullsLoading || (data === null && !err);
+  if (awaitingInitialContent) {
+    const loadMessage =
+      loading && data === null
+        ? "Loading repository overview from GitHub…"
+        : pullsLoading
+          ? "Loading pull requests and wiring the overview…"
+          : "Preparing your overview…";
+    return <OverviewSkeleton message={loadMessage} />;
+  }
+
+  const stats = data?.stats;
+  const anti = data?.topAntiPatterns?.length ? data.topAntiPatterns : [];
+  const mostChanged = data?.mostChangedFiles?.length ? data.mostChangedFiles : [];
+  const visiblePRs = showAllPRs ? recentPulls : recentPulls.slice(0, 5);
+  const visibleFiles = showAllFiles ? mostChanged : mostChanged.slice(0, 5);
 
   return (
     <div className="min-h-[calc(100vh-56px)] bg-gitlore-bg">
@@ -157,7 +169,12 @@ const Overview = () => {
             </div>
 
             {err && <p className="text-sm text-gitlore-error">{err}</p>}
-            {loading && <p className="text-sm text-gitlore-text-secondary">Loading overview from GitHub…</p>}
+            {loading && data && (
+              <p className="flex items-center gap-2 text-sm text-gitlore-text-secondary" role="status" aria-live="polite">
+                <Spinner className="h-4 w-4" label="Refreshing overview" />
+                Refreshing overview…
+              </p>
+            )}
 
             <FadeIn direction="up">
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
@@ -181,12 +198,17 @@ const Overview = () => {
             <div>
               <div className="mb-3 text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary">Recent pull requests</div>
               {pullsErr && <p className="mb-2 text-sm text-gitlore-error">{pullsErr}</p>}
-              {pullsLoading && <p className="text-sm text-gitlore-text-secondary">Loading PRs from GitHub…</p>}
+              {pullsLoading && (
+                <p className="mb-2 flex items-center gap-2 text-sm text-gitlore-text-secondary" role="status" aria-live="polite">
+                  <Spinner className="h-4 w-4" label="Loading pull requests" />
+                  Loading PRs from GitHub…
+                </p>
+              )}
               {!pullsLoading && !pullsErr && recentPulls.length === 0 && (
                 <p className="text-sm text-gitlore-text-secondary">No pull requests returned (empty repo or API scope).</p>
               )}
               <ul className="space-y-2">
-                {recentPulls.map((pr) => (
+                {visiblePRs.map((pr) => (
                   <li key={pr.number} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm">
                     <a
                       href={pr.htmlUrl}
@@ -204,6 +226,15 @@ const Overview = () => {
                   </li>
                 ))}
               </ul>
+              {recentPulls.length > 5 ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAllPRs((v) => !v)}
+                  className="mt-2 cursor-pointer text-xs text-gitlore-accent hover:text-gitlore-accent-hover"
+                >
+                  {showAllPRs ? "Show less" : `Show all ${recentPulls.length}`}
+                </button>
+              ) : null}
             </div>
 
             <div>
@@ -232,7 +263,7 @@ const Overview = () => {
               <div className="mb-3 text-xs font-medium uppercase tracking-wider text-gitlore-text-secondary">Most churned files (recent commits)</div>
               <ol className="space-y-1.5">
                 {mostChanged.length ? (
-                  mostChanged.map((file, i) => (
+                  visibleFiles.map((file, i) => (
                     <li key={file.name} className="flex items-baseline gap-2 text-sm">
                       <span className="w-4 shrink-0 text-xs text-gitlore-text-secondary">{i + 1}.</span>
                       <button
@@ -249,6 +280,15 @@ const Overview = () => {
                   <p className="text-sm text-gitlore-text-secondary">No churn data yet (private repo scope or no recent commits).</p>
                 )}
               </ol>
+              {mostChanged.length > 5 ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAllFiles((v) => !v)}
+                  className="mt-2 cursor-pointer text-xs text-gitlore-accent hover:text-gitlore-accent-hover"
+                >
+                  {showAllFiles ? "Show less" : `Show all ${mostChanged.length}`}
+                </button>
+              ) : null}
             </div>
 
             <button
