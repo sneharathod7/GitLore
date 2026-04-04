@@ -539,3 +539,76 @@ export async function getEmbedding(
   }
   return null;
 }
+
+/**
+ * Translate a short English TTS script to Hindi (Devanagari) for multilingual TTS.
+ * Used by /api/voice/tts when locale=hi.
+ */
+export async function translateEnglishToHindiForSpeech(english: string): Promise<string> {
+  const key = process.env.GEMINI_API_KEY?.trim();
+  if (!key) throw new Error("GEMINI_API_KEY not configured");
+
+  const model = genAI.getGenerativeModel({ model: GEMINI_GENERATION_MODEL });
+  const prompt = `You translate English into natural Hindi suitable for text-to-speech.
+
+Rules:
+- Output ONLY Hindi in Devanagari script. No English, no quotes, no preamble, no bullet points.
+- Keep technical terms (file paths, PR numbers, repo names) in Latin script when clearer.
+- Stay concise; do not add facts not in the source.
+
+English to translate:
+
+${english}`;
+
+  const result = await withGemini429Retry(() =>
+    model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    })
+  );
+
+  const text = result.response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!text) throw new Error("Empty Hindi translation from model");
+  return text.length > 5000 ? `${text.slice(0, 4999)}…` : text;
+}
+
+/**
+ * Spoken Q&A for ElevenLabs voice agent (client tool → this via API).
+ * Context must be the full GitLore narrative summary; answer is plain English for TTS.
+ */
+export async function voiceStoryAnswer(contextText: string, userQuestion: string): Promise<string> {
+  const key = process.env.GEMINI_API_KEY?.trim();
+  if (!key) throw new Error("GEMINI_API_KEY not configured");
+
+  const ctx = contextText.slice(0, 12_000);
+  const q = userQuestion.trim().slice(0, 2000);
+
+  const model = genAI.getGenerativeModel({ model: GEMINI_GENERATION_MODEL });
+  const prompt = `You are answering a developer who is asking by voice about a single line of code in a GitHub repository.
+
+The following text is the ONLY source of truth (from GitLore: blame, PRs, discussion, decision, impact). Do not invent commits, people, PR numbers, or events that are not clearly supported by this text.
+
+--- STORY CONTEXT ---
+${ctx}
+--- END CONTEXT ---
+
+The user asked (spoken): "${q.replace(/"/g, "'")}"
+
+Reply in plain English suitable to be read aloud by a voice assistant:
+- Start directly with the answer; no "Sure!" preamble unless it is one short word.
+- Use 2 to 6 short sentences unless they clearly ask for more detail.
+- If the context does not contain the answer, say that this summary does not include that information and suggest what you can answer from the story instead.
+- No markdown, bullet lists, or code fences. You may say short paths or PR numbers inline.
+- Be accurate, concrete, and easy to understand.
+
+Your reply:`;
+
+  const result = await withGemini429Retry(() =>
+    model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    })
+  );
+
+  const text = result.response.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!text) throw new Error("Empty voice answer from model");
+  return text.length > 4000 ? `${text.slice(0, 3999)}…` : text;
+}

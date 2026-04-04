@@ -10,6 +10,7 @@ import {
 import {
   enrichRepositoryOverview,
   aggregatePatternCounts,
+  aggregateRepoPatternInsights,
   listRepoPathsLimited,
   getRepoFileContent,
   listAuthenticatedUserRepos,
@@ -393,6 +394,39 @@ repoRouter.get("/repo/:owner/:name/pulls/:number/diff-review", async (c) => {
     return c.json(
       {
         error: "Failed to load pull request diff",
+        message:
+          process.env.NODE_ENV === "development" && error instanceof Error
+            ? error.message
+            : undefined,
+      },
+      500
+    );
+  }
+});
+
+/**
+ * GET /api/repo/:owner/:name/pattern-insights
+ * Mongo-backed themes: knowledge graph types/topics, explain labels, line-analyze cache.
+ */
+repoRouter.get("/repo/:owner/:name/pattern-insights", async (c) => {
+  try {
+    const user = getCurrentUser(c);
+    if (!user) return c.json({ error: "Not authenticated" }, 401);
+
+    const owner = c.req.param("owner");
+    const name = c.req.param("name");
+    if (!owner || !name) {
+      return c.json({ error: "Missing owner or repository name" }, 400);
+    }
+
+    const db = getDB();
+    const data = await aggregateRepoPatternInsights(db, owner, name);
+    return c.json(data);
+  } catch (error) {
+    console.error("pattern-insights error:", error);
+    return c.json(
+      {
+        error: "Failed to load pattern insights",
         message:
           process.env.NODE_ENV === "development" && error instanceof Error
             ? error.message

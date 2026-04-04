@@ -10,7 +10,8 @@ const rightLines = [
   "}, [id])",
 ];
 
-const LIT_PATTERN_CELLS = new Set([0, 1, 2, 7, 12]);
+/** Matches 10 curated reference examples on Patterns page */
+const LIT_PATTERN_CELLS = new Set([0, 1, 2, 4, 7]);
 
 const BentoGrid = () => {
   return (
@@ -76,10 +77,11 @@ const BentoGrid = () => {
               <div className="bg-[var(--surface)] px-7 pb-6 pt-7">
                 <h3 className="font-heading text-[18px] font-semibold tracking-[-0.02em] text-[var(--text)]">Pattern Library</h3>
                 <p className="mt-1 font-body text-[14px] font-normal leading-[1.65] tracking-[-0.01em] text-[var(--text-secondary)]">
-                  20 pre-loaded anti-patterns. Memory leaks, N+1 queries, XSS, SQL injection - matched automatically.
+                  Reference examples (memory leaks, N+1, XSS, SQLi) plus repo stats from cached PR explanations — not a
+                  whole-repo scanner.
                 </p>
                 <div className="mx-auto mt-5 grid w-max grid-cols-5 gap-1">
-                  {Array.from({ length: 20 }).map((_, i) => {
+                  {Array.from({ length: 10 }).map((_, i) => {
                     const isLit = LIT_PATTERN_CELLS.has(i);
                     return (
                       <div

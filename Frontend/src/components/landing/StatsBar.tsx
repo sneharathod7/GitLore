@@ -1,7 +1,11 @@
 import { useRef, useEffect, useState } from "react";
 import { animate } from "animejs";
 
-const labels = ["anti-patterns pre-loaded", "average context assembly", "competitors built for review receivers"];
+const labels = [
+  "reference pattern examples",
+  "average context assembly",
+  "competitors built for review receivers",
+];
 
 const StatsBar = () => {
   const sectionRef = useRef<HTMLElement>(null);
@@ -21,7 +25,7 @@ const StatsBar = () => {
         const o1 = { v: 0 };
         const o2 = { v: 0 };
         animate(o0, {
-          v: 20,
+          v: 10,
           duration: 800,
           ease: "outExpo",
           onUpdate: () => setNums((p) => [`${Math.round(o0.v)}`, p[1], p[2]]),
