@@ -311,11 +311,8 @@ ${toolJson}
 User question:
 ${question}
 
-Write a clear, structured answer in markdown-friendly plain text.${
-    concise
-      ? " Keep it SHORT: max ~220 words, 3–6 bullets or two brief paragraphs, no Mermaid, no long essay."
-      : ""
-  }`;
+Write a clear, structured answer in markdown-friendly plain text.
+If many nodes or a large tool JSON payload are present, prioritize the most relevant few points and summarize the rest briefly.`;
 
   const ai = getGoogleGenAI();
   const synthRes = await withGemini429Retry(() =>
