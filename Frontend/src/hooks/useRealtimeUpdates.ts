@@ -35,7 +35,13 @@ export function useRealtimeUpdates(repo: string | null) {
   const [streamError, setStreamError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!repo) return;
+    setEvents([]);
+    setConnected(false);
+    setStreamError(null);
+
+    if (!repo) {
+      return;
+    }
 
     const eventSource = new EventSource(
       `/api/events/stream?repo=${encodeURIComponent(repo)}`,

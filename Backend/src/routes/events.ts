@@ -19,8 +19,8 @@ function sseResumeId(change: { _id?: { _data?: unknown } | string }): string {
 }
 
 /**
- * GET /api/events/stream?repo=owner/name
- * SSE when new rows appear in explanations_cache (requires replica set / Atlas).
+ * GET /api/events/stream?repo=owner/name (required)
+ * SSE when new rows appear in explanations_cache for that repo (requires replica set / Atlas).
  */
 eventsRouter.get("/events/stream", (c) => {
   const user = getCurrentUser(c);
@@ -29,23 +29,23 @@ eventsRouter.get("/events/stream", (c) => {
   }
 
   const repoRaw = c.req.query("repo");
-  const repoNorm = repoRaw ? normalizeRepoKey(repoRaw) : null;
+  if (typeof repoRaw !== "string" || !repoRaw.trim()) {
+    return c.json({ error: "repo query parameter is required" }, 400);
+  }
+  const repoNorm = normalizeRepoKey(repoRaw);
 
   return streamSSE(c, async (stream) => {
     const db = getDB();
     const collection = db.collection("explanations_cache");
 
-    const pipeline =
-      repoNorm != null
-        ? [
-            {
-              $match: {
-                operationType: { $in: ["insert", "replace", "update"] },
-                "fullDocument.repo": repoNorm,
-              },
-            },
-          ]
-        : [{ $match: { operationType: { $in: ["insert", "replace", "update"] } } }];
+    const pipeline = [
+      {
+        $match: {
+          operationType: { $in: ["insert", "replace", "update"] },
+          "fullDocument.repo": repoNorm,
+        },
+      },
+    ];
 
     let changeStream: ReturnType<typeof collection.watch>;
     try {
@@ -120,8 +120,8 @@ eventsRouter.get("/events/stream", (c) => {
 });
 
 /**
- * GET /api/events/narratives?repo=owner/name
- * SSE for new commit_cache narratives.
+ * GET /api/events/narratives?repo=owner/name (required)
+ * SSE for new commit_cache narratives for that repo.
  */
 eventsRouter.get("/events/narratives", (c) => {
   const user = getCurrentUser(c);
@@ -130,23 +130,23 @@ eventsRouter.get("/events/narratives", (c) => {
   }
 
   const repoRaw = c.req.query("repo");
-  const repoNorm = repoRaw ? normalizeRepoKey(repoRaw) : null;
+  if (typeof repoRaw !== "string" || !repoRaw.trim()) {
+    return c.json({ error: "repo query parameter is required" }, 400);
+  }
+  const repoNorm = normalizeRepoKey(repoRaw);
 
   return streamSSE(c, async (stream) => {
     const db = getDB();
     const collection = db.collection("commit_cache");
 
-    const pipeline =
-      repoNorm != null
-        ? [
-            {
-              $match: {
-                operationType: { $in: ["insert", "replace", "update"] },
-                "fullDocument.repo": repoNorm,
-              },
-            },
-          ]
-        : [{ $match: { operationType: { $in: ["insert", "replace", "update"] } } }];
+    const pipeline = [
+      {
+        $match: {
+          operationType: { $in: ["insert", "replace", "update"] },
+          "fullDocument.repo": repoNorm,
+        },
+      },
+    ];
 
     let changeStream: ReturnType<typeof collection.watch>;
     try {

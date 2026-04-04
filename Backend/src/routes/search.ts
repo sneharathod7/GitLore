@@ -44,10 +44,6 @@ searchRouter.post("/search", async (c) => {
     const db = getDB();
 
     const repoNorm = normalizeRepoKey(request.repo);
-    const repoPattern = new RegExp(
-      `^${repoNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-      "i"
-    );
 
     try {
       const hybridRows = await hybridDecisionSearch(
@@ -93,7 +89,7 @@ searchRouter.post("/search", async (c) => {
 
     const allResults = await db
       .collection("commit_cache")
-      .find({ repo: repoPattern })
+      .find({ repo: repoNorm })
       .limit(400)
       .toArray();
 

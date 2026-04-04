@@ -7,10 +7,6 @@
 import type { Document } from "mongodb";
 import { getDB } from "./mongo";
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** Normalize owner/name repo key (lowercase, no leading slashes). */
 export function normalizeRepoKey(repo: string): string {
   return repo.trim().replace(/^\/+|\/+$/g, "").toLowerCase();
@@ -185,12 +181,11 @@ export type RepoAnalyticsResult = {
 export async function getRepoAnalytics(repo: string): Promise<RepoAnalyticsResult> {
   const db = getDB();
   const repoKey = normalizeRepoKey(repo);
-  const repoRe = new RegExp(`^${escapeRegex(repoKey)}$`, "i");
 
   const results = await db
     .collection("commit_cache")
     .aggregate([
-      { $match: { repo: repoRe } },
+      { $match: { repo: repoKey } },
       {
         $facet: {
           confidenceBreakdown: [
@@ -338,7 +333,7 @@ export async function getPatternDistribution(
 ): Promise<Array<{ _id: string | null; count: number; avgConfidence: number | null }>> {
   const db = getDB();
   const matchStage: Document = repo
-    ? { $match: { repo: new RegExp(`^${escapeRegex(normalizeRepoKey(repo))}$`, "i") } }
+    ? { $match: { repo: normalizeRepoKey(repo) } }
     : { $match: {} };
 
   return db
