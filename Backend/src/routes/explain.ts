@@ -23,7 +23,13 @@ const explainRequestSchema = z.object({
 });
 
 const DEMO_MODE = process.env.DEMO_MODE === "true";
-const GEMINI_MS = 5000;
+/** Wall-clock cap for Gemini explain call; 5s was too tight and caused 504 + truncated JSON. */
+const GEMINI_MS = (() => {
+  const raw = process.env.GEMINI_EXPLAIN_TIMEOUT_MS?.trim();
+  const n = raw ? parseInt(raw, 10) : 25_000;
+  if (!Number.isFinite(n)) return 25_000;
+  return Math.min(Math.max(n, 5000), 120_000);
+})();
 
 /** Words, 2-word combos, and common phrases like n+1 */
 export function extractCommentKeywords(comment: string): string[] {

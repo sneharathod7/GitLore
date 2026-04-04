@@ -1,12 +1,9 @@
-import { RangeSetBuilder } from "@codemirror/state";
+import { RangeSetBuilder, StateField, type Text, type Extension } from "@codemirror/state";
 import {
   Decoration,
   DecorationSet,
   EditorView,
-  ViewPlugin,
-  ViewUpdate,
   WidgetType,
-  type Extension,
 } from "@codemirror/view";
 import { createRoot, type Root } from "react-dom/client";
 import { animate as animeAnimate } from "animejs";
@@ -75,14 +72,13 @@ class CommentWidget extends WidgetType {
 }
 
 function buildDecorations(
-  view: EditorView,
+  doc: Text,
   comments: CommentBadgeData[],
   onCommentClick: (c: CommentBadgeData) => void
 ): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   for (const c of comments) {
     if (c.line == null || c.line < 1) continue;
-    const doc = view.state.doc;
     if (c.line > doc.lines) continue;
     const line = doc.line(c.line);
     const deco = Decoration.widget({
@@ -97,6 +93,7 @@ function buildDecorations(
 
 /**
  * CodeMirror 6 extension: inject comment badges below given 1-based line numbers.
+ * Block widgets must be provided via StateField — ViewPlugin decorations cannot be block-level.
  */
 export function inlineCommentsExtension(
   comments: CommentBadgeData[],
@@ -107,20 +104,16 @@ export function inlineCommentsExtension(
     return [];
   }
 
-  return ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet;
-
-      constructor(readonly view: EditorView) {
-        this.decorations = buildDecorations(view, comments, onCommentClick);
-      }
-
-      update(update: ViewUpdate) {
-        if (update.docChanged) {
-          this.decorations = this.decorations.map(update.changes);
-        }
-      }
+  return StateField.define<DecorationSet>({
+    create(state) {
+      return buildDecorations(state.doc, comments, onCommentClick);
     },
-    { decorations: (v) => v.decorations }
-  );
+    update(decorations, tr) {
+      if (tr.docChanged) {
+        return decorations.map(tr.changes);
+      }
+      return decorations;
+    },
+    provide: (f) => EditorView.decorations.from(f),
+  });
 }
