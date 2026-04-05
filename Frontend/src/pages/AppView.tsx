@@ -343,47 +343,76 @@ const DiffViewer = ({
   );
 };
 
-const TIMELINE_FONT = 'Inter, system-ui, sans-serif';
-
+/**
+ * HTML/CSS timeline — label type uses fixed px (Tailwind text-[12px] / text-[11px]) so resizing
+ * the /app split panes does not scale text. (SVG + viewBox + w-full made every user-unit—including
+ * fontSize—scale with container width.)
+ */
 const StoryTimeline = ({ dots }: { dots: TimelineDot[] }) => {
-  const svgRef = useRef<SVGSVGElement>(null);
-  const containerWidth = 600;
-  const dotR = 6;
-  const spacing = dots.length > 1 ? (containerWidth - 40) / (dots.length - 1) : 0;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const n = dots.length;
 
   useEffect(() => {
-    if (!svgRef.current) return;
-    const circles = svgRef.current.querySelectorAll(".timeline-dot");
+    if (!rootRef.current) return;
+    const els = rootRef.current.querySelectorAll(".timeline-dot");
     const ctx = gsap.context(() => {
-      gsap.from(circles, { scale: 0, opacity: 0, stagger: 0.2, duration: 0.4, ease: "back.out(1.7)", transformOrigin: "center" });
+      gsap.from(els, {
+        scale: 0,
+        opacity: 0,
+        stagger: 0.2,
+        duration: 0.4,
+        ease: "back.out(1.7)",
+        transformOrigin: "center center",
+      });
     });
     return () => ctx.revert();
-  }, []);
+  }, [dots]);
+
+  if (n === 0) return null;
 
   return (
-    <div className="-mx-1 min-h-[100px] overflow-x-auto px-1" style={{ minWidth: 280 }}>
-      <svg ref={svgRef} viewBox={`0 0 ${containerWidth} 100`} className="block w-full" preserveAspectRatio="xMidYMid meet">
-        {dots.length > 1 && (
-          <line x1={20} y1={24} x2={20 + spacing * (dots.length - 1)} y2={24} stroke="#2A2A3A" strokeWidth={2} />
+    <div ref={rootRef} className="-mx-1 min-h-[100px] min-w-0 px-1">
+      <div className="relative w-full min-w-0 pt-1">
+        {n > 1 && (
+          <div
+            className="pointer-events-none absolute top-[11px] z-0 h-0.5 bg-[var(--border-strong)]"
+            style={{
+              left: `calc(100% / ${n} / 2)`,
+              right: `calc(100% / ${n} / 2)`,
+            }}
+            aria-hidden
+          />
         )}
-        {dots.map((dot, i) => {
-          const cx = dots.length > 1 ? 20 + i * spacing : containerWidth / 2;
-          return (
-            <g key={i}>
-              <circle className="timeline-dot" cx={cx} cy={24} r={dotR} fill={dot.color} />
-              <text x={cx} y={48} textAnchor="middle" fill="var(--text)" fontSize={12} fontFamily={TIMELINE_FONT} fontWeight={500}>
-                {dot.label}
-              </text>
-              <text x={cx} y={64} textAnchor="middle" fill="var(--text-secondary)" fontSize={11} fontFamily={TIMELINE_FONT}>
-                {dot.sublabel}
-              </text>
-              <text x={cx} y={78} textAnchor="middle" fill="var(--text-secondary)" fontSize={11} fontFamily={TIMELINE_FONT} fontStyle="italic">
-                {dot.date}
-              </text>
-            </g>
-          );
-        })}
-      </svg>
+        <div
+          className="relative z-[1] grid w-full min-w-0 gap-y-2"
+          style={{ gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}
+        >
+          {dots.map((dot, i) => (
+            <div key={`dot-${i}`} className="flex justify-center pt-1">
+              <div
+                className="timeline-dot h-3 w-3 shrink-0 rounded-full border-2 border-gitlore-surface"
+                style={{ backgroundColor: dot.color }}
+                aria-hidden
+              />
+            </div>
+          ))}
+          {dots.map((dot, i) => {
+            const align =
+              n === 1 ? "text-center" : i === 0 ? "text-left" : i === n - 1 ? "text-right" : "text-center";
+            return (
+              <div key={`lbl-${i}`} className={`min-w-0 px-1 ${align}`}>
+                <p className="line-clamp-2 text-[12px] font-medium leading-snug text-gitlore-text" title={dot.label}>
+                  {dot.label}
+                </p>
+                <p className="mt-0.5 truncate text-[11px] text-gitlore-text-secondary" title={dot.sublabel}>
+                  {dot.sublabel}
+                </p>
+                <p className="mt-0.5 text-[11px] italic leading-snug text-gitlore-text-secondary">{dot.date}</p>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };
@@ -1714,12 +1743,12 @@ const AppView = () => {
         </button>
         <div className="min-w-0 flex-1" />
         <span className="hidden truncate px-3 py-2 font-code text-sm text-gitlore-text-secondary md:block md:max-lg:text-xs">
-          {target.filePath || "— no file selected —"}
+          {target.filePath || "No file selected"}
         </span>
       </div>
       <div className="border-t border-gitlore-border/60 px-3 py-2 md:hidden">
         <span className="block truncate font-code text-[11px] leading-5 text-gitlore-text-secondary">
-          {target.filePath || "— no file selected —"}
+          {target.filePath || "No file selected"}
         </span>
       </div>
     </div>
